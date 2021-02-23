@@ -34,8 +34,8 @@ DEFINE_GUID(DEVINTERFACE_AUDIO_RENDER, 0xe6327cad, 0xdcec, 0x4949, 0xae, 0x8a, 0
 #define DECLSPEC_UUID_WRAPPER(x) __declspec(uuid(#x))
 
 #define DEFINE_IID(interfaceName, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
-            interface DECLSPEC_UUID_WRAPPER(l##-##w1##-##w2##-##b1##b2##-##b3##b4##b5##b6##b7##b8) interfaceName; \
-            EXTERN_C const GUID DECLSPEC_SELECTANY IID_##interfaceName = __uuidof(interfaceName)
+			interface DECLSPEC_UUID_WRAPPER(l##-##w1##-##w2##-##b1##b2##-##b3##b4##b5##b6##b7##b8) interfaceName; \
+			EXTERN_C const GUID DECLSPEC_SELECTANY IID_##interfaceName = __uuidof(interfaceName)
 
 DEFINE_IID(IXAudio2Legacy, 8bcf1f58, 9fe7, 4583, 8a, c6, e2, ad, c4, 65, c8, bb);
 
@@ -492,12 +492,28 @@ void MumbleAudioOutput::ExternalAudioState::PushPosition(MumbleAudioOutput* base
 
 void MumbleAudioOutput::ExternalAudioState::PushSound(int16_t* voiceBuffer, int len)
 {
+	// 48kHz = 48 samples/msec, 30ms to account for ticking anomaly
+	lastPush = timeGetTime() + (len / 48) + 30;
+
 	sink->PushAudio(voiceBuffer, len);
 }
 
 bool MumbleAudioOutput::ExternalAudioState::Valid()
 {
 	return sink.GetRef();
+}
+
+bool MumbleAudioOutput::ExternalAudioState::IsTalking()
+{
+	if (isTalking)
+	{
+		if (timeGetTime() >= lastPush)
+		{
+			isTalking = false;
+		}
+	}
+
+	return isTalking;
 }
 
 void MumbleAudioOutput::HandleClientConnect(const MumbleUser& user)
@@ -509,6 +525,12 @@ void MumbleAudioOutput::HandleClientConnect(const MumbleUser& user)
 		{
 			m_initializeVar.wait(initLock);
 		}
+	}
+
+	// if still not initialized, exit out
+	if (!m_initialized)
+	{
+		return;
 	}
 
 	if (g_useNativeAudio->GetValue())
@@ -994,7 +1016,7 @@ void MumbleAudioOutput::GetTalkers(std::vector<uint32_t>* talkers)
 			continue;
 		}
 
-		if (client.second->isTalking)
+		if (client.second->IsTalking())
 		{
 			talkers->push_back(client.first);
 		}
@@ -1142,27 +1164,48 @@ void MumbleAudioOutput::InitializeAudioDevice()
 
 	ComPtr<IMMDevice> device;
 
-	if (m_deviceGuid.empty())
+	// ensure the initialize variable is signaled no matter what
+	struct Unlocker
 	{
-		if (FAILED(m_mmDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eCommunications, device.ReleaseAndGetAddressOf())))
+		Unlocker(MumbleAudioOutput* self)
+			: self(self)
 		{
-			trace("%s: failed GetDefaultAudioEndpoint\n", __func__);
-			return;
+		
 		}
 
-		// opt out of ducking
-		DuckingOptOut(device);
-	}
-	else
-	{
-		device = GetMMDeviceFromGUID(false, m_deviceGuid);
-
-		if (!device.Get())
+		~Unlocker()
 		{
-			trace("%s: failed GetMMDeviceFromGUID\n", __func__);
-			return;
+			std::unique_lock<std::mutex> lock(self->m_initializeMutex);
+			self->m_initializeVar.notify_all();
+		}
+
+		MumbleAudioOutput* self;
+	} unlocker(this);
+
+	while (!device.Get())
+	{
+		if (m_deviceGuid.empty())
+		{
+			if (FAILED(m_mmDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eCommunications, device.ReleaseAndGetAddressOf())))
+			{
+				trace("%s: failed GetDefaultAudioEndpoint\n", __func__);
+				return;
+			}
+		}
+		else
+		{
+			device = GetMMDeviceFromGUID(false, m_deviceGuid);
+
+			if (!device.Get())
+			{
+				trace("%s: failed GetMMDeviceFromGUID\n", __func__);
+				m_deviceGuid = "";
+			}
 		}
 	}
+
+	// opt out of ducking
+	DuckingOptOut(device);
 
 	auto xa2Dll = LoadLibraryExW(L"XAudio2_8.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 	decltype(&CreateAudioReverb) _CreateAudioReverb;
@@ -1274,6 +1317,13 @@ void MumbleAudioOutput::InitializeAudioDevice()
 		DWORD channelMask = 0;
 		m_masteringVoice->GetChannelMask(&channelMask);
 
+		// some devices (like Sony 'Wireless Controller') return 0 channels
+		// assume these will be stereo
+		if (channelMask == 0)
+		{
+			channelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+		}
+
 		m_channelCount = 0;
 
 		for (int i = 0; i < 32; i++)
@@ -1318,8 +1368,6 @@ void MumbleAudioOutput::InitializeAudioDevice()
 	{
 		std::unique_lock<std::mutex> lock(m_initializeMutex);
 		m_initialized = true;
-
-		m_initializeVar.notify_all();
 	}
 }
 

@@ -457,7 +457,7 @@ static size_t CurlHeaderInfo(char* buffer, size_t size, size_t nitems, void* use
 		
 		if (colonPos != std::string::npos)
 		{
-			(*cd->responseHeaders)[str.substr(0, colonPos)] = str.substr(colonPos + 2, str.length() - 2 - colonPos - 2);
+			(*cd->responseHeaders).emplace(str.substr(0, colonPos), str.substr(colonPos + 2, str.length() - 2 - colonPos - 2));
 		}
 	}
 
@@ -501,7 +501,7 @@ static std::tuple<CURL*, std::shared_ptr<CurlData>> SetupCURLHandle(HttpClientIm
 	curl_easy_setopt(curlHandle, CURLOPT_XFERINFODATA, curlDataPtr);
 	curl_easy_setopt(curlHandle, CURLOPT_XFERINFOFUNCTION, CurlXferInfo);
 	curl_easy_setopt(curlHandle, CURLOPT_NOPROGRESS, 0);
-	curl_easy_setopt(curlHandle, CURLOPT_FOLLOWLOCATION, true);
+	curl_easy_setopt(curlHandle, CURLOPT_FOLLOWLOCATION, options.followLocation);
 	curl_easy_setopt(curlHandle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
 	curl_easy_setopt(curlHandle, CURLOPT_ERRORBUFFER, &curlData->errBuffer);
 	curl_easy_setopt(curlHandle, CURLOPT_SSL_VERIFYPEER, 0);

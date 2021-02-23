@@ -29,6 +29,15 @@ type InputArgument =
     ResultAsLong |
     ResultAsObject;
 
+interface StateBagInterface {
+    [key: string]: any;
+    set(key: string, value: any, replicated: boolean): void
+}
+
+interface EntityInterface {
+    state: StateBagInterface
+}
+
 interface CitizenInterface {
     trace(...args: string[]): void
     setTickFunction(callback: Function): void
@@ -56,7 +65,7 @@ interface CitizenInterface {
     resultAsString(): ResultAsString
     resultAsVector(): ResultAsVector
     resultAsLong(): ResultAsLong
-    rsesultAsObject(): ResultAsObject
+    resultAsObject(): ResultAsObject
 
     makeRefFunction(refFunction: Function): string
 }
@@ -79,6 +88,9 @@ declare function emitNet(eventName: string, ...args: any[]): void
 declare function TriggerServerEvent(eventName: string, ...args: any[]): void
 declare function TriggerLatentServerEvent(eventName: string, bps: number, ...args: any[]): void
 
+declare function getPlayerIdentifiers(player: string): string[]
+declare function getPlayers(): number[]
+
 declare function emitNet(eventName: string, target: number|string, ...args: any[]): void
 declare function TriggerClientEvent(eventName: string, target: number|string, ...args: any[]): void
 declare function TriggerLatentClientEvent(eventName: string, target: number|string, bps: number, ...args: any[]): void
@@ -87,6 +99,11 @@ declare function removeEventListener(eventName: string, callback: Function): voi
 
 declare function setTick(callback: Function): number
 declare function clearTick(callback: number): void
+
+declare function NewStateBag(name: string) : StateBagInterface;
+declare function Entity(entity: number): EntityInterface
+declare var GlobalState : StateBagInterface
+declare function Player(entity: number|string): EntityInterface
 
 declare var exports: any;
 

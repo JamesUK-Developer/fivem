@@ -51,6 +51,9 @@
 
 std::string g_lastConn;
 
+extern bool XBR_InterceptCardResponse(const nlohmann::json& j);
+extern bool XBR_InterceptCancelDefer();
+
 static LONG WINAPI TerminateInstantly(LPEXCEPTION_POINTERS pointers)
 {
 	if (pointers->ExceptionRecord->ExceptionCode == STATUS_BREAKPOINT)
@@ -61,14 +64,54 @@ static LONG WINAPI TerminateInstantly(LPEXCEPTION_POINTERS pointers)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static void RestartGameToOtherBuild()
+static void SaveBuildNumber(uint32_t build)
 {
-#ifdef GTA_FIVE
+	std::wstring fpath = MakeRelativeCitPath(L"CitizenFX.ini");
+
+	if (GetFileAttributes(fpath.c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		WritePrivateProfileString(L"Game", L"SavedBuildNumber", fmt::sprintf(L"%d", build).c_str(), fpath.c_str());
+	}
+}
+
+void RestartGameToOtherBuild(int build = 0)
+{
+#if defined(GTA_FIVE) || defined(IS_RDR3)
 	static HostSharedData<CfxState> hostData("CfxInitState");
-	auto cli = va(L"\"%s\" %s -switchcl +connect \"%s\"",
+	const wchar_t* cli;
+
+	if (!build)
+	{
+		cli = va(L"\"%s\" %s -switchcl \"fivem://connect/%s\"",
 		hostData->gameExePath,
 		Is2060() ? L"" : L"-b2060",
 		ToWide(g_lastConn));
+
+		build = (Is2060()) ? 1604 : 2060;
+	}
+	else
+	{
+		cli = va(L"\"%s\" %s -switchcl \"fivem://connect/%s\"",
+		hostData->gameExePath,
+		build == 1604 ? L"" : fmt::sprintf(L"-b%d", build),
+		ToWide(g_lastConn));
+	}
+
+	uint32_t defaultBuild =
+#ifdef GTA_FIVE
+	1604
+#elif defined(IS_RDR3)
+	1311
+#else
+	0
+#endif
+	;
+
+	// we won't launch the default build if we don't do this
+	if (build == defaultBuild)
+	{
+		SaveBuildNumber(defaultBuild);
+	}
 
 	STARTUPINFOW si = { 0 };
 	si.cb = sizeof(si);
@@ -83,6 +126,8 @@ static void RestartGameToOtherBuild()
 	ExitProcess(0x69);
 #endif
 }
+
+extern void InitializeBuildSwitch(int build);
 
 void saveSettings(const wchar_t *json) {
 	PWSTR appDataPath;
@@ -151,22 +196,49 @@ inline bool HasDefaultName()
 	{
 		IClientEngine* steamClient = steamComponent->GetPrivateClient();
 
-		InterfaceMapper steamFriends(steamClient->GetIClientFriends(steamComponent->GetHSteamUser(), steamComponent->GetHSteamPipe(), "CLIENTFRIENDS_INTERFACE_VERSION001"));
-
-		if (steamFriends.IsValid())
+		if (steamClient)
 		{
-			return true;
+			InterfaceMapper steamFriends(steamClient->GetIClientFriends(steamComponent->GetHSteamUser(), steamComponent->GetHSteamPipe(), "CLIENTFRIENDS_INTERFACE_VERSION001"));
+
+			if (steamFriends.IsValid())
+			{
+				return true;
+			}
 		}
 	}
 
 	return false;
 }
 
-static NetLibrary* netLibrary;
+NetLibrary* netLibrary;
 static bool g_connected;
 
-static void ConnectTo(const std::string& hostnameStr)
+static void ConnectTo(const std::string& hostnameStr, bool fromUI = false, const std::string& connectParams = "")
 {
+	auto connectParamsReal = connectParams;
+	static bool switched;
+
+	if (wcsstr(GetCommandLineW(), L"-switchcl") && !switched)
+	{
+		connectParamsReal = "switchcl=true&" + connectParamsReal;
+		switched = true;
+	}
+
+	if (!fromUI)
+	{
+		if (nui::HasMainUI())
+		{
+			auto j = nlohmann::json::object({
+				{ "type", "connectTo" },
+				{ "hostnameStr", hostnameStr },
+				{ "connectParams", connectParamsReal }
+			});
+			nui::PostFrameMessage("mpMenu", j.dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace));
+
+			return;
+		}
+	}
+
 	if (g_connected)
 	{
 		trace("Ignoring ConnectTo because we're already connecting/connected.\n");
@@ -335,6 +407,8 @@ static void UpdateJumpList(const std::vector<ServerLink>& links)
 	pcdl->CommitList();
 }
 
+void DLL_IMPORT UiDone();
+
 static InitFunction initFunction([] ()
 {
 	static std::function<void()> g_onYesCallback;
@@ -365,6 +439,12 @@ static InitFunction initFunction([] ()
 			auto peerAddress = netLibrary->GetCurrentPeer().ToString();
 
 			nui::PostRootMessage(fmt::sprintf(R"({ "type": "setServerAddress", "data": "%s" })", peerAddress));
+		});
+
+		netLibrary->OnRequestBuildSwitch.Connect([](int build)
+		{
+			InitializeBuildSwitch(build);
+			g_connected = false;
 		});
 
 		netLibrary->OnConnectionError.Connect([] (const char* error)
@@ -656,20 +736,47 @@ static InitFunction initFunction([] ()
 	{
 		if (!_wcsicmp(type, L"getMinModeInfo"))
 		{
+#ifdef GTA_FIVE
+			static bool done = ([]
+			{
+				UiDone();
+
+				auto hWnd = FindWindowW(L"grcWindow", NULL);
+				ShowWindow(hWnd, SW_SHOW);
+
+				// game code locks it
+				LockSetForegroundWindow(LSFW_UNLOCK);
+				SetForegroundWindow(hWnd);
+
+				return true;
+			})();
+#endif
+
 			auto manifest = CoreGetMinModeManifest();
 
 			nui::PostFrameMessage("mpMenu", fmt::sprintf(R"({ "type": "setMinModeInfo", "enabled": %s, "data": %s })", manifest->IsEnabled() ? "true" : "false", manifest->GetRaw()));
+
+			static bool initSwitched;
+
+			if (wcsstr(GetCommandLineW(), L"-switchcl") && !initSwitched)
+			{
+				nui::PostFrameMessage("mpMenu", fmt::sprintf(R"({ "type": "setSwitchCl", "enabled": %s })", true));
+				initSwitched = true;
+			}
 		}
 		else if (!_wcsicmp(type, L"connectTo"))
 		{
 			std::wstring hostnameStrW = arg;
 			std::string hostnameStr(hostnameStrW.begin(), hostnameStrW.end());
 
-			ConnectTo(hostnameStr);
+			ConnectTo(hostnameStr, true);
 		}
 		else if (!_wcsicmp(type, L"cancelDefer"))
 		{
-			netLibrary->CancelDeferredConnection();
+			if (!XBR_InterceptCancelDefer())
+			{
+				netLibrary->CancelDeferredConnection();
+			}
 
 			g_connected = false;
 		}
@@ -843,9 +950,12 @@ static InitFunction initFunction([] ()
 			{
 				auto json = nlohmann::json::parse(ToNarrow(arg));
 
-				if (!g_cardConnectionToken.empty())
+				if (!XBR_InterceptCardResponse(json))
 				{
-					netLibrary->SubmitCardResponse(json["data"].dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace), g_cardConnectionToken);
+					if (!g_cardConnectionToken.empty())
+					{
+						netLibrary->SubmitCardResponse(json["data"].dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace), g_cardConnectionToken);
+					}
 				}
 			}
 			catch (const std::exception& e)
@@ -941,12 +1051,11 @@ static void ProtocolRegister()
 		return; \
 	}
 
-	HKEY key;
-	wchar_t path[MAX_PATH];
-	wchar_t command[1024];
+	static HostSharedData<CfxState> hostData("CfxInitState");
 
-	GetModuleFileNameW(NULL, path, sizeof(path));
-	swprintf_s(command, L"\"%s\" \"%%1\"", path);
+	HKEY key;
+	wchar_t command[1024];
+	swprintf_s(command, L"\"%s\" \"%%1\"", hostData->gameExePath);
 
 	CHECK_STATUS(RegCreateKeyW(HKEY_CURRENT_USER, L"SOFTWARE\\Classes\\fivem", &key));
 	CHECK_STATUS(RegSetValueExW(key, NULL, 0, REG_SZ, (BYTE*)L"FiveM", 6 * 2));
@@ -991,7 +1100,11 @@ void Component_RunPreInit()
 {
 	static HostSharedData<CfxState> hostData("CfxInitState");
 
+#ifndef _DEBUG
+	if (hostData->IsGameProcess())
+#else
 	if (hostData->IsMasterProcess())
+#endif
 	{
 		ProtocolRegister();
 	}
@@ -1000,6 +1113,7 @@ void Component_RunPreInit()
 	LPWSTR* argv = CommandLineToArgvW(GetCommandLine(), &argc);
 
 	static std::string connectHost;
+	static std::string connectParams;
 	static std::string authPayload;
 
 	for (int i = 1; i < argc; i++)
@@ -1019,6 +1133,11 @@ void Component_RunPreInit()
 						if (!parsed->pathname().empty())
 						{
 							connectHost = parsed->pathname().substr(1);
+							const auto& search = parsed->search_parameters();
+							if (!search.empty())
+							{
+								connectParams = search.to_string();
+							}
 						}
 					}
 					else if (parsed->host() == "accept-auth")
@@ -1045,8 +1164,9 @@ void Component_RunPreInit()
 			{
 				if (type == rage::InitFunctionType::INIT_CORE)
 				{
-					ConnectTo(connectHost);
+					ConnectTo(connectHost, false, connectParams);
 					connectHost = "";
+					connectParams = "";
 				}
 			}, 999999);
 		}
@@ -1055,9 +1175,12 @@ void Component_RunPreInit()
 			nng_socket socket;
 			nng_dialer dialer;
 
+			auto j = nlohmann::json::object({ { "host", connectHost }, { "params", connectParams } });
+			std::string connectMsg = j.dump(-1, ' ', false, nlohmann::detail::error_handler_t::strict);
+
 			nng_push0_open(&socket);
 			nng_dial(socket, "ipc:///tmp/fivem_connect", &dialer, 0);
-			nng_send(socket, const_cast<char*>(connectHost.c_str()), connectHost.size(), 0);
+			nng_send(socket, const_cast<char*>(connectMsg.c_str()), connectMsg.size(), 0);
 
 			if (!hostData->gamePid)
 			{
@@ -1110,6 +1233,16 @@ void Component_RunPreInit()
 
 static InitFunction connectInitFunction([]()
 {
+#if __has_include(<gameSkeleton.h>)
+	rage::OnInitFunctionStart.Connect([](rage::InitFunctionType type)
+	{
+		if (type == rage::INIT_BEFORE_MAP_LOADED)
+		{
+			SaveBuildNumber(xbr::GetGameBuild());
+		}
+	});
+#endif
+
 	static nng_socket netSocket;
 	static nng_listener listener;
 
@@ -1141,7 +1274,8 @@ static InitFunction connectInitFunction([]()
 			std::string connectMsg(buffer, buffer + bufLen);
 			nng_free(buffer, bufLen);
 
-			ConnectTo(connectMsg);
+			auto connectData = nlohmann::json::parse(connectMsg);
+			ConnectTo(connectData["host"], false, connectData["params"]);
 
 			SetForegroundWindow(FindWindow(L"grcWindow", nullptr));
 		}
@@ -1156,6 +1290,274 @@ static InitFunction connectInitFunction([]()
 			HandleAuthPayload(msg);
 
 			SetForegroundWindow(FindWindow(L"grcWindow", nullptr));
+		}
+	});
+});
+
+static bool displayingPermissionRequest;
+static std::string requestedPermissionResource;
+static std::string requestedPermissionUrl;
+static std::string requestedPermissionOrigin;
+static int requestedPermissionMask;
+static std::function<void(bool, int)> requestedPermissionCallback;
+static std::map<std::string, int> g_mediaSettings;
+
+#include <json.hpp>
+
+static void ParseMediaSettings(const std::string& jsonStr)
+{
+	try
+	{
+		auto j = nlohmann::json::parse(jsonStr);
+		
+		for (auto& pair : j["origins"])
+		{
+			g_mediaSettings.emplace(pair[0].get<std::string>(), pair[1].get<int>());
+		}
+	}
+	catch (std::exception& e)
+	{
+
+	}
+}
+
+void LoadPermissionSettings()
+{
+	PWSTR appDataPath;
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath)))
+	{
+		// create the directory if not existent
+		std::wstring cfxPath = std::wstring(appDataPath) + L"\\CitizenFX";
+		CreateDirectory(cfxPath.c_str(), nullptr);
+
+		// open and read the profile file
+		std::wstring settingsPath = cfxPath + L"\\media_access.json";
+		if (FILE* profileFile = _wfopen(settingsPath.c_str(), L"rb"))
+		{
+			std::ifstream settingsFile(settingsPath);
+
+			std::stringstream settingsStream;
+			settingsStream << settingsFile.rdbuf();
+			settingsFile.close();
+
+			ParseMediaSettings(settingsStream.str());
+		}
+
+		CoTaskMemFree(appDataPath);
+	}
+}
+
+void SavePermissionSettings(const std::string& json)
+{
+	PWSTR appDataPath;
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath)))
+	{
+		// create the directory if not existent
+		std::wstring cfxPath = std::wstring(appDataPath) + L"\\CitizenFX";
+		CreateDirectory(cfxPath.c_str(), nullptr);
+		// open and read the profile file
+		std::wstring settingsPath = cfxPath + L"\\media_access.json";
+		std::ofstream settingsFile(settingsPath);
+		settingsFile << json;
+		settingsFile.close();
+		CoTaskMemFree(appDataPath);
+	}
+}
+
+void SavePermissionSettings()
+{
+	auto a = nlohmann::json::array();
+
+	for (auto& pair : g_mediaSettings)
+	{
+		a.push_back(nlohmann::json::array({ pair.first, pair.second }));
+	}
+
+	auto j = nlohmann::json::object();
+	j["origins"] = a;
+
+	try
+	{
+		SavePermissionSettings(j.dump());
+	}
+	catch (std::exception& e)
+	{
+	
+	}
+}
+
+static bool permGrants[32];
+
+bool HandleMediaRequest(const std::string& frameOrigin, const std::string& url, int permissions, const std::function<void(bool, int)>& onComplete)
+{
+	// if not connected to a server, we will allow media
+	if (netLibrary->GetConnectionState() == NetLibrary::CS_IDLE)
+	{
+		onComplete(true, permissions);
+		return true;
+	}
+
+	// if this server+resource already has permission, keep it
+	auto origin = netLibrary->GetCurrentPeer().ToString() + ":" + frameOrigin;
+	int hadPermissions = 0;
+
+	if (auto it = g_mediaSettings.find(origin); it != g_mediaSettings.end())
+	{
+		hadPermissions = it->second;
+
+		if ((it->second & permissions) == permissions)
+		{
+			onComplete(true, it->second & permissions);
+			return true;
+		}
+	}
+
+	// if we're already in a request, deny it
+	if (displayingPermissionRequest)
+	{
+		return false;
+	}
+
+	// start a request cycle
+	requestedPermissionResource = frameOrigin;
+	requestedPermissionUrl = url;
+	requestedPermissionCallback = [onComplete, hadPermissions, permissions](bool success, int mask)
+	{
+		displayingPermissionRequest = false;
+
+		if (onComplete)
+		{
+			onComplete(success, (mask | hadPermissions) & permissions);
+
+			if (success)
+			{
+				g_mediaSettings[requestedPermissionOrigin] |= mask;
+				SavePermissionSettings();
+			}
+		}
+	};
+	requestedPermissionMask = permissions & ~hadPermissions;
+	requestedPermissionOrigin = origin;
+	
+	permGrants[0] = true;
+	permGrants[1] = false;
+	permGrants[2] = false;
+	permGrants[3] = false;
+
+	displayingPermissionRequest = true;
+
+	return true;
+}
+
+#include <imgui.h>
+
+static InitFunction mediaRequestInit([]()
+{
+	LoadPermissionSettings();
+
+	ConHost::OnShouldDrawGui.Connect([](bool* should)
+	{
+		*should = *should || displayingPermissionRequest;
+	});
+
+	ConHost::OnDrawGui.Connect([]()
+	{
+		if (displayingPermissionRequest)
+		{
+			const float DISTANCE = 10.0f;
+			ImVec2 window_pos = ImVec2(ImGui::GetMainViewport()->Pos.x + ImGui::GetIO().DisplaySize.x - DISTANCE, ImGui::GetMainViewport()->Pos.y + DISTANCE);
+			ImVec2 window_pos_pivot = ImVec2(1.0f, 0.0f);
+
+			if (ConHost::IsConsoleOpen())
+			{
+				window_pos = ImVec2(ImGui::GetMainViewport()->Pos.x + ImGui::GetIO().DisplaySize.x - DISTANCE, ImGui::GetMainViewport()->Pos.y + ImGui::GetIO().DisplaySize.y - DISTANCE);
+				window_pos_pivot = ImVec2(1.0f, 1.0f);
+			}
+
+			ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+			ImGui::SetNextWindowFocus();
+			ImGui::SetNextWindowBgAlpha(0.3f); // Transparent background
+			if (ImGui::Begin("Permission Request", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+			{
+				ImGui::Text("Permission request: %s", requestedPermissionResource.c_str());
+				ImGui::Separator();
+				
+				if (ConHost::IsConsoleOpen())
+				{
+					ImGui::Text("The resource %s at %s wants access to the following:", requestedPermissionResource.c_str(), requestedPermissionUrl.c_str());
+
+					static std::map<int, std::string> permTypes{
+						{ nui::NUI_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE, "Capture your desktop sound" },
+						{ nui::NUI_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE, "Capture your full screen ^1/!\\ ALERT! This may expose personal information!" },
+						{ nui::NUI_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE, "Capture your microphone" },
+						{ nui::NUI_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE, "Capture your webcam" },
+					};
+
+					int i = 0;
+
+					for (auto& type : permTypes)
+					{
+						if (requestedPermissionMask & type.first)
+						{
+							ImGui::Checkbox(type.second.c_str(), &permGrants[i]);
+						}
+
+						i++;
+					}
+
+					if (requestedPermissionMask & nui::NUI_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE)
+					{
+						if (permGrants[2] && !permGrants[3])
+						{
+							permGrants[3] = permGrants[2];
+						}
+					}
+
+					// "accepted must match requested" dumb stuff
+					if (!(requestedPermissionMask & nui::NUI_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE))
+					{
+						bool allowedAny = permGrants[0] || permGrants[1];
+						permGrants[0] = allowedAny;
+						permGrants[1] = allowedAny;
+					}
+
+					ImGui::Separator();
+					if (ImGui::Button("Allow"))
+					{
+						int outcomeMask = 0;
+						int i = 0;
+
+						for (auto& type : permTypes)
+						{
+							if (permGrants[i] && (requestedPermissionMask & type.first))
+							{
+								outcomeMask |= type.first;
+							}
+
+							i++;
+						}
+
+						requestedPermissionCallback(true, outcomeMask);
+						requestedPermissionCallback = {};
+					}
+					
+					ImGui::SameLine();
+
+					if (ImGui::Button("Deny"))
+					{
+						requestedPermissionCallback(false, 0);
+						requestedPermissionCallback = {};
+					}
+				}
+				else
+				{
+					ImGui::Text("The resource at %s is requesting your permission to access media devices.", requestedPermissionUrl.c_str());
+					ImGui::Separator();
+					ImGui::Text("Press ^2F8^7 to accept/deny.");
+				}
+
+				ImGui::End();
+			}
 		}
 	});
 });

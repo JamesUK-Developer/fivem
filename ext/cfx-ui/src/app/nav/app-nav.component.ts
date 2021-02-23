@@ -79,6 +79,10 @@ export class AppNavComponent {
 	}
 
 	goThere() {
+		if (this.gameName !== 'rdr3') {
+			(<any>window).invokeNative('enterGameplay', '');
+			document.body.style.visibility = 'hidden';
+		}
 	}
 
 	exitGame() {

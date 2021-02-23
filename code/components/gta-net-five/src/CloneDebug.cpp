@@ -15,6 +15,8 @@
 #include <netInterface.h>
 #include <netSyncTree.h>
 
+#include <EASTL/bitset.h>
+
 #include <rlNetBuffer.h>
 
 #include <ICoreGameInit.h>
@@ -22,6 +24,11 @@
 #include <Error.h>
 
 #include <Hooking.h>
+
+inline size_t GET_NIDX(rage::netSyncTree* tree, void* node)
+{
+	return *((uint8_t*)node + 66);
+}
 
 static bool Splitter(bool split_vertically, float thickness, float* size1, float* size2, float min_size1, float min_size2, float splitter_long_axis_size = -1.0f)
 {
@@ -130,9 +137,9 @@ namespace rage
 		uint32_t flags;
 		uint32_t pad3;
 		uint64_t pad4;
-		netSyncDataNodeBase* parentData; //0x50
-		uint32_t childCount;
-		netSyncDataNodeBase* children[8];
+		netSyncDataNodeBase* externalDependentNodeRoot; //0x50
+		uint32_t externalDependencyCount;
+		netSyncDataNodeBase* externalDependencies[8];
 		uint8_t syncFrequencies[8];
 		void* nodeBuffer;
 	};
@@ -205,7 +212,14 @@ static void RenderNetObjectTree()
 						{
 							if (ImGui::IsItemClicked())
 							{
+								bool isDifferent = !g_curNetObjectSelection || g_curNetObjectSelection->objectType != object->objectType;
+
 								g_curNetObjectSelection = object;
+
+								if (isDifferent)
+								{
+									g_curSyncNodeSelection = nullptr; // in case the current sync node doesn't exist e.g. for a different sync tree
+								}
 							}
 
 							RenderSyncTree(object, object->GetSyncTree());
@@ -321,7 +335,7 @@ static TSyncLog TraverseSyncTree(TSyncLog* old, int oldId, rage::netSyncTree* sy
 
 #include <array>
 
-void DirtyNode(void* object, void* node);
+void DirtyNode(rage::netObject* object, rage::netSyncDataNodeBase* node);
 
 namespace rage
 {
@@ -335,28 +349,38 @@ struct WriteTreeState
 	uint32_t time;
 	bool wroteAny;
 	uint32_t* lastChangeTimePtr;
+	int pass = 0;
 };
 
 struct NetObjectNodeData
 {
-	std::array<uint8_t, 1024> lastData;
+	std::tuple<std::array<uint8_t, 1024>, int> lastData;
+	std::tuple<std::array<uint8_t, 1024>, int> currentData;
 	uint32_t lastChange;
 	uint32_t lastAck;
+	uint32_t lastResend;
+	bool manuallyDirtied = false;
 
 	NetObjectNodeData()
 	{
-		memset(lastData.data(), 0, lastData.size());
+		std::array<uint8_t, 1024> dummyData;
+		memset(dummyData.data(), 0, dummyData.size());
+		
+		lastData = { dummyData, 0 };
+		currentData = { dummyData, 0 };
+
 		lastChange = 0;
 		lastAck = 0;
+		lastResend = 0;
 	}
 };
 
 struct NetObjectData
 {
-	std::unordered_map<rage::netSyncNodeBase*, NetObjectNodeData> nodes;
+	std::array<NetObjectNodeData, 200> nodes;
 };
 
-std::unordered_map<int, NetObjectData> g_syncData;
+std::array<std::unique_ptr<NetObjectData>, 65536> g_syncData;
 
 template<typename T>
 static bool TraverseTreeInternal(rage::netSyncNodeBase* node, T& state, const std::function<bool(T&, rage::netSyncNodeBase*, const std::function<bool()>&)>& cb)
@@ -386,6 +410,33 @@ static void TraverseTree(rage::netSyncTree* tree, T& state, const std::function<
 	TraverseTreeInternal(*(rage::netSyncNodeBase**)((char*)tree + 16), state, cb);
 }
 
+static void InitTree(rage::netSyncTree* tree)
+{
+	// unused padding in GTA5
+	auto didStuff = (uint16_t*)((char*)tree + 1222);
+
+	if (*didStuff != 0xCFCF)
+	{
+		size_t idx = 1;
+		TraverseTree<size_t>(tree, idx, [](size_t& idx, rage::netSyncNodeBase* node, const std::function<bool()>& cb) -> bool
+		{
+			if (node->IsParentNode())
+			{
+				cb();
+			}
+			else if (node->IsDataNode())
+			{
+				*((uint8_t*)node + 66) = idx++;
+			}
+
+			return true;
+		});
+
+
+		*didStuff = 0xCFCF;
+	}
+}
+
 inline uint32_t GetDelayForUpdateFrequency(uint8_t updateFrequency)
 {
 	switch (updateFrequency)
@@ -406,8 +457,30 @@ inline uint32_t GetDelayForUpdateFrequency(uint8_t updateFrequency)
 	}
 }
 
+static void AddNodeAndExternalDependentNodes(netSyncDataNodeBase* node, rage::netSyncDataNodeBase* children[], size_t* childCount, size_t maxChildren)
+{
+	// if we still have space
+	if (*childCount < maxChildren)
+	{
+		// add self
+		children[*childCount] = node;
+		(*childCount)++;
+
+		// add children
+		for (size_t i = 0; i < node->externalDependencyCount; i++)
+		{
+			AddNodeAndExternalDependentNodes(node->externalDependencies[i], children, childCount, maxChildren);
+		}
+	}
+}
+
+static void LoadPlayerAppearanceDataNode(rage::netSyncNodeBase* node);
+static void StorePlayerAppearanceDataNode(rage::netSyncNodeBase* node);
+
 bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object, rage::datBitBuffer* buffer, uint32_t time, void* logger, uint8_t targetPlayer, void* outNull, uint32_t* lastChangeTime)
 {
+	InitTree(this);
+
 	WriteTreeState state;
 	state.object = object;
 	state.flags = flags;
@@ -443,26 +516,34 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 		sizeLength = 11;
 	}
 
-	TraverseTree<WriteTreeState>(this, state, [sizeLength](WriteTreeState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
+	eastl::bitset<200> processedNodes;
+
+	// callback
+	auto nodeWriter = [this, sizeLength, &processedNodes](WriteTreeState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
 	{
 		auto buffer = state.buffer;
 		bool didWrite = false;
+
+		size_t nodeIdx = GET_NIDX(this, node);
 
 		if (state.flags & node->flags1 && (!node->flags3 || state.objFlags & node->flags3))
 		{
 			// save position to allow rewinding
 			auto startPos = buffer->GetPosition();
 
-			// write presence header placeholder
-			if (node->flags2 & state.flags)
+			if (state.pass == 2)
 			{
-				buffer->WriteBit(0);
-			}
+				// write presence header placeholder
+				if (node->flags2 & state.flags)
+				{
+					buffer->WriteBit(0);
+				}
 
-			// write Cfx length placeholder
-			if (node->IsDataNode())
-			{
-				buffer->WriteUns(0, sizeLength);
+				// write Cfx length placeholder
+				if (node->IsDataNode())
+				{
+					buffer->WriteUns(0, sizeLength);
+				}
 			}
 
 			if (node->IsParentNode())
@@ -472,37 +553,112 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 			else
 			{
 				// compare last data for the node
-				auto nodeData = &g_syncData[state.object->objectId].nodes[node];
+				auto nodeData = &g_syncData[state.object->objectId]->nodes[nodeIdx];
 
 				uint32_t nodeSyncDelay = GetDelayForUpdateFrequency(node->GetUpdateFrequency(UpdateLevel::VERY_HIGH));
 
-				// calculate node change state
-				std::array<uint8_t, 1024> tempData;
-				memset(tempData.data(), 0, tempData.size());
+				// throttle sends by waiting for the requested node delay
+				uint32_t lastChangeDelta = (state.time - nodeData->lastChange);
 
-				rage::datBitBuffer tempBuf(tempData.data(), (sizeLength == 11) ? 256 : tempData.size());
-
-				node->WriteObject(state.object, &tempBuf, nullptr, true);
-
-				if (memcmp(tempData.data(), nodeData->lastData.data(), tempData.size()) != 0)
+				if (state.pass == 1 && (lastChangeDelta > nodeSyncDelay || nodeData->manuallyDirtied))
 				{
-					// throttle sends by waiting for the requested node delay
-					uint32_t lastChangeDelta = (state.time - nodeData->lastChange);
-
-					if (lastChangeDelta > nodeSyncDelay)
+					auto updateNode = [this, &state, &processedNodes, sizeLength](rage::netSyncDataNodeBase* dataNode, bool force) -> bool
 					{
-						nodeData->lastChange = state.time;
-						nodeData->lastData = tempData;
+						size_t dataNodeIdx = GET_NIDX(this, dataNode);
+						auto nodeData = &g_syncData[state.object->objectId]->nodes[dataNodeIdx];
+
+						if (processedNodes.test(dataNodeIdx))
+						{
+							return nodeData->lastChange == state.time || force;
+						}
+
+						// calculate node change state
+						std::array<uint8_t, 1024> tempData;
+						memset(tempData.data(), 0, tempData.size());
+
+						LoadPlayerAppearanceDataNode(dataNode);
+
+						rage::datBitBuffer tempBuf(tempData.data(), (sizeLength == 11) ? 256 : tempData.size());
+						dataNode->WriteObject(state.object, &tempBuf, state.logger, true);
+
+						StorePlayerAppearanceDataNode(dataNode);
+
+						if (force || tempBuf.m_curBit != std::get<1>(nodeData->lastData) || memcmp(tempData.data(), std::get<0>(nodeData->lastData).data(), tempData.size()) != 0)
+						{
+							nodeData->lastResend = 0;
+							nodeData->lastChange = state.time;
+							nodeData->lastData = { tempData, tempBuf.m_curBit };
+							nodeData->currentData = { tempData, tempBuf.m_curBit };
+							nodeData->manuallyDirtied = false;
+
+							return true;
+						}
+
+						processedNodes.set(dataNodeIdx);
+
+						return false;
+					};
+
+					auto dataNode = (rage::netSyncDataNodeBase*)node;
+
+					static_assert(offsetof(rage::netSyncDataNodeBase, externalDependentNodeRoot) == 0x50, "parentData off");
+
+					// if we are a data node, we will have to ensure external-dependent nodes are sent as a bundle at all times
+					// this means:
+					// 1. trace up to the root of the external-dependent node tree.
+					// 2. from this point, *recursively* dirty all children, for we are dirty as well.
+					//
+					// the original implementation here did not take rage::netSyncTree::Update nor rage::AddNodeAndExternalDependentNodes as a reference
+					// and wasn't tracing up to the root of the external-dependent node tree, nor did it recursively dirty children.
+
+					if (dataNode->externalDependentNodeRoot || dataNode->externalDependencyCount > 0)
+					{
+						auto rootNode = dataNode;
+
+						while (rootNode->externalDependentNodeRoot)
+						{
+							rootNode = rootNode->externalDependentNodeRoot;
+						}
+
+						if (rootNode)
+						{
+							rage::netSyncDataNodeBase* children[16];
+							size_t childCount = 0;
+
+							AddNodeAndExternalDependentNodes(rootNode, children, &childCount, std::size(children));
+
+							bool written = false;
+
+							for (int child = 0; child < childCount; child++)
+							{
+								size_t childIdx = GET_NIDX(this, children[child]);
+								auto childData = &g_syncData[state.object->objectId]->nodes[childIdx];
+
+								written |= updateNode(children[child], nodeData->manuallyDirtied || childData->manuallyDirtied || written);
+							}
+						}
+					}
+					else
+					{
+						updateNode(dataNode, nodeData->manuallyDirtied);
 					}
 				}
 
-				if (state.lastChangeTimePtr)
-				{
-					auto oldVal = *state.lastChangeTimePtr;
+				// resend skipping is broken, perhaps?
+				bool isResendSkipped = false;//((state.time - nodeData->lastResend) < 150);
 
-					if (nodeData->lastChange > oldVal)
+				if (state.pass == 2)
+				{
+					if (state.lastChangeTimePtr)
 					{
-						*state.lastChangeTimePtr = nodeData->lastChange;
+						auto oldVal = *state.lastChangeTimePtr;
+
+						if (nodeData->lastChange > oldVal && !isResendSkipped)
+						{
+							*state.lastChangeTimePtr = nodeData->lastChange;
+
+							nodeData->lastResend = state.time;
+						}
 					}
 				}
 
@@ -518,9 +674,17 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 					shouldWriteNode = true;
 				}
 
+				if (isResendSkipped)
+				{
+					shouldWriteNode = false;
+				}
+
 				if (shouldWriteNode)
 				{
-					node->WriteObject(state.object, buffer, state.logger, false);
+					if (state.pass == 2)
+					{
+						buffer->WriteBits(std::get<0>(nodeData->currentData).data(), std::get<1>(nodeData->currentData), 0);
+					}
 
 					didWrite = true;
 				}
@@ -528,31 +692,22 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 
 			if (!didWrite)
 			{
-				// set position to just past the 0
-				if (node->flags2 & state.flags)
+				if (state.pass == 2)
 				{
-					buffer->Seek(startPos + 1);
-				}
-				else
-				{
-					buffer->Seek(startPos);
+					// set position to just past the 0
+					if (node->flags2 & state.flags)
+					{
+						buffer->Seek(startPos + 1);
+					}
+					else
+					{
+						buffer->Seek(startPos);
+					}
 				}
 			}
 			else
 			{
 				state.wroteAny = true;
-
-				if (node->IsDataNode())
-				{
-					auto dataNode = (rage::netSyncDataNodeBase*)node;
-
-					static_assert(offsetof(rage::netSyncDataNodeBase, parentData) == 0x50, "parentData off");
-
-					for (int child = 0; child < dataNode->childCount; child++)
-					{
-						DirtyNode(state.object, dataNode->children[child]);
-					}
-				}
 
 				if (state.object)
 				{
@@ -560,11 +715,15 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 				}
 
 				uint32_t endPos = buffer->GetPosition();
-				buffer->Seek(startPos);
 
-				if (node->flags2 & state.flags)
+				if (state.pass == 2)
 				{
-					buffer->WriteBit(true);
+					buffer->Seek(startPos);
+
+					if (node->flags2 & state.flags)
+					{
+						buffer->WriteBit(true);
+					}
 				}
 
 				if (node->IsDataNode())
@@ -576,6 +735,7 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 						length -= 1;
 					}
 
+#if 0
 					if (length >= (1 << 13))
 					{
 						auto extraDumpPath = MakeRelativeCitPath(L"cache\\extra_dump_info.bin");
@@ -593,16 +753,32 @@ bool netSyncTree::WriteTreeCfx(int flags, int objFlags, rage::netObject* object,
 
 						FatalError("Tried to write a bad node length of %d bits in a '%s'. There should only ever be 8192 bits. Please report this on https://forum.fivem.net/t/318260 together with the .zip file from 'save information' below.", length, typeid(*node).name());
 					}
+#endif
 
-					buffer->WriteUns(length, sizeLength);
+					if (state.pass == 2)
+					{
+						buffer->WriteUns(length, sizeLength);
+					}
 				}
 
-				buffer->Seek(endPos);
+				if (state.pass == 2)
+				{
+					buffer->Seek(endPos);
+				}
 			}
 		}
 
 		return didWrite;
-	});
+	};
+
+	// traverse state and dirty nodes first
+	state.pass = 1;
+	TraverseTree<WriteTreeState>(this, state, nodeWriter);
+
+	// then traverse again, writing nodes
+	state.pass = 2;
+	state.wroteAny = false;
+	TraverseTree<WriteTreeState>(this, state, nodeWriter);
 
 	return state.wroteAny;
 }
@@ -615,11 +791,13 @@ struct AckState
 
 void netSyncTree::AckCfx(netObject* object, uint32_t timestamp)
 {
+	InitTree(this);
+
 	AckState state;
 	state.object = object;
 	state.time = timestamp;
 
-	TraverseTree<AckState>(this, state, [](AckState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
+	TraverseTree<AckState>(this, state, [this](AckState& state, rage::netSyncNodeBase* node, const std::function<bool()>& cb)
 	{
 		if (node->IsParentNode())
 		{
@@ -627,9 +805,11 @@ void netSyncTree::AckCfx(netObject* object, uint32_t timestamp)
 		}
 		else
 		{
-			if (state.time > g_syncData[state.object->objectId].nodes[node].lastAck)
+			size_t nodeIdx = GET_NIDX(this, node);
+
+			if (state.time > g_syncData[state.object->objectId]->nodes[nodeIdx].lastAck)
 			{
-				g_syncData[state.object->objectId].nodes[node].lastAck = state.time;
+				g_syncData[state.object->objectId]->nodes[nodeIdx].lastAck = state.time;
 			}
 		}
 
@@ -638,9 +818,133 @@ void netSyncTree::AckCfx(netObject* object, uint32_t timestamp)
 }
 }
 
-void DirtyNode(void* object, void* node)
+static bool g_recordingDrilldown;
+static bool g_recordedDrilldown;
+static uint64_t g_drilldownEnd;
+static uint32_t g_drilldownIdx;
+
+struct ClonePacketMsg
 {
-	rage::g_syncData[((rage::netObject*)object)->objectId].nodes[(rage::netSyncNodeBase*)node].lastChange = rage::netInterface_queryFunctions::GetInstance()->GetTimestamp();
+	std::string_view what;
+	std::string why;
+};
+
+struct ClonePacketData
+{
+	uint64_t frameIdx;
+	uint32_t ts;
+	
+	std::vector<ClonePacketMsg> messages;
+};
+
+#include <nutsnbolts.h>
+
+static InitFunction initFunctionDrilldown([]() 
+{
+	OnGameFrame.Connect([]()
+	{
+		if (g_recordingDrilldown && GetTickCount64() >= g_drilldownEnd)
+		{
+			g_recordingDrilldown = false;
+			g_recordedDrilldown = true;
+		}
+	});
+});
+
+static std::map<uint32_t, ClonePacketData> g_drilldownData;
+
+namespace sync
+{
+bool IsDrilldown()
+{
+	return g_recordingDrilldown;
+}
+
+void AddDrilldown(uint64_t frameIdx, std::vector<std::tuple<std::string_view, std::string>>&& data)
+{
+	ClonePacketData bit;
+	bit.frameIdx = frameIdx;
+
+	for (auto& d : data)
+	{
+		ClonePacketMsg msg;
+		msg.what = std::move(std::get<0>(d));
+		msg.why = std::move(std::get<1>(d));
+
+		bit.messages.push_back(std::move(msg));
+	}
+
+	bit.ts = 1500 - (g_drilldownEnd - GetTickCount64());
+
+	g_drilldownData[g_drilldownIdx++] = std::move(bit);
+}
+}
+
+void RenderNetDrilldownWindow()
+{
+	static bool open = true;
+
+	ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_Appearing);
+
+	if (ImGui::Begin("Network Drilldown", &open))
+	{
+		if (!g_recordingDrilldown && ImGui::Button("Record"))
+		{
+			g_drilldownData.clear();
+			g_drilldownIdx = 0;
+			g_recordedDrilldown = false;
+
+			g_recordingDrilldown = true;
+			g_drilldownEnd = GetTickCount64() + 1500;
+		}
+		
+		if (g_recordingDrilldown)
+		{
+			ImGui::ButtonEx("Recording", {}, ImGuiButtonFlags_Disabled);
+		}
+
+		if (g_recordedDrilldown)
+		{
+			for (auto& [id, node] : g_drilldownData)
+			{
+				sync::FrameIndex fi{ node.frameIdx };
+
+				if (ImGui::TreeNode(va("Packet %d @+%d (%d:%d)", id, node.ts, fi.frameIndex, fi.currentFragment)))
+				{
+					for (auto& message : node.messages)
+					{
+						ImGui::TreeNodeEx(va("%s: %s", message.what, message.why), ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
+					}
+
+					ImGui::TreePop();
+				}
+			}
+		}
+	}
+
+	ImGui::End();
+}
+
+extern uint32_t* rage__s_NetworkTimeThisFrameStart;
+
+void DirtyNode(rage::netObject* object, rage::netSyncDataNodeBase* node)
+{
+	auto tree = object->GetSyncTree();
+	InitTree(tree);
+
+	size_t nodeIdx = GET_NIDX(tree, node);
+	const auto& sd = rage::g_syncData[((rage::netObject*)object)->objectId];
+
+	if (!sd)
+	{
+		return;
+	}
+
+	auto& nodeData = sd->nodes[nodeIdx];
+	nodeData.lastChange = *rage__s_NetworkTimeThisFrameStart;
+	nodeData.lastAck = 0;
+	nodeData.lastResend = 0;
+	nodeData.manuallyDirtied = true;
 }
 
 static bool g_captureSyncLog;
@@ -697,16 +1001,21 @@ void RenderSyncNodeDetail(rage::netObject* netObject, rage::netSyncNodeBase* nod
 		left.push_back(line);
 	});
 
+	LoadPlayerAppearanceDataNode(node);
 	node->LogObject(netObject, &logger);
+	StorePlayerAppearanceDataNode(node);
 
 	std::vector<std::string> right = syncLog[netObject->objectId][node];
 
 	auto t = g_netObjectNodeMapping[netObject->objectId][node];
 	
+	InitTree(netObject->GetSyncTree());
+	auto& sd = rage::g_syncData[netObject->objectId]->nodes[GET_NIDX(netObject->GetSyncTree(), node)];
+
 	ImGui::Text("Last %s: %d ms ago", std::get<int>(t) ? "written" : "read", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - std::get<uint32_t>(t));
-	ImGui::Text("Last ack: %d ms ago", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - rage::g_syncData[netObject->objectId].nodes[node].lastAck);
-	ImGui::Text("Last change: %d ms ago", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - rage::g_syncData[netObject->objectId].nodes[node].lastChange);
-	ImGui::Text("Change - Ack: %d ms", rage::g_syncData[netObject->objectId].nodes[node].lastChange - rage::g_syncData[netObject->objectId].nodes[node].lastAck);
+	ImGui::Text("Last ack: %d ms ago", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - sd.lastAck);
+	ImGui::Text("Last change: %d ms ago", rage::netInterface_queryFunctions::GetInstance()->GetTimestamp() - sd.lastChange);
+	ImGui::Text("Change - Ack: %d ms", sd.lastChange - sd.lastAck);
 
 	ImGui::Columns(2);
 	ImGui::Text("Current");
@@ -742,24 +1051,29 @@ void RenderSyncNodeDetail(rage::netObject* netObject, rage::netSyncNodeBase* nod
 	ImGui::Columns(1);
 }
 
-uint32_t GetRemoteTime();
-
 static InitFunction initFunction([]()
 {
 	static bool netViewerEnabled;
 	static bool timeWindowEnabled;
+	static bool drilldownWindowEnabled;
 
 	static ConVar<bool> netViewerVar("netobjviewer", ConVar_Archive, false, &netViewerEnabled);
 	static ConVar<bool> syncLogVar("netobjviewer_syncLog", ConVar_Archive, false, &g_captureSyncLog);
 	static ConVar<bool> timeVar("net_showTime", ConVar_Archive, false, &timeWindowEnabled);
+	static ConVar<bool> cloneDrilldownVar("net_showDrilldown", ConVar_Archive, false, &drilldownWindowEnabled);
 
 	ConHost::OnShouldDrawGui.Connect([](bool* should)
 	{
-		*should = *should || netViewerEnabled || timeWindowEnabled;
+		*should = *should || netViewerEnabled || timeWindowEnabled || drilldownWindowEnabled;
 	});
 
 	ConHost::OnDrawGui.Connect([]()
 	{
+		if (drilldownWindowEnabled)
+		{
+			RenderNetDrilldownWindow();
+		}
+
 		if (timeWindowEnabled)
 		{
 			static bool timeOpen = true;
@@ -861,6 +1175,30 @@ static void DumpSyncTree(rage::netSyncTree* syncTree)
 }
 #endif
 
+static uintptr_t g_vtbl_playerAppearanceDataNode;
+static uint32_t g_offset_playerAppearanceDataNode_hasDecorations;
+
+static char g_localPlayer_hasDecorations;
+
+namespace rage
+{
+static void LoadPlayerAppearanceDataNode(rage::netSyncNodeBase* node)
+{
+	if (*(uintptr_t*)node == g_vtbl_playerAppearanceDataNode)
+	{
+		*((char*)node + g_offset_playerAppearanceDataNode_hasDecorations) = g_localPlayer_hasDecorations;
+	}
+}
+
+static void StorePlayerAppearanceDataNode(rage::netSyncNodeBase* node)
+{
+	if (*(uintptr_t*)node == g_vtbl_playerAppearanceDataNode)
+	{
+		g_localPlayer_hasDecorations = *((char*)node + g_offset_playerAppearanceDataNode_hasDecorations);
+	}
+}
+}
+
 static HookFunction hookFunction([]()
 {
 #if _DEBUG
@@ -875,6 +1213,12 @@ static HookFunction hookFunction([]()
 		}
 	});
 #endif
+
+	// CPlayerAppearanceDataNode decorations uninitialized value
+	{
+		g_vtbl_playerAppearanceDataNode = hook::get_address<uintptr_t>(hook::pattern("48 89 BB B8 00 00 00 48 89 83 B0 00 00 00").count(2).get(1).get<void*>(-0xE));
+		g_offset_playerAppearanceDataNode_hasDecorations = *hook::get_pattern<uint32_t>("88 83 ? ? ? ? 84 C0 75 0D 44 8B C5 33", 2);
+	}
 
 	// allow CSyncDataLogger even without label string
 	hook::nop(hook::get_pattern("4D 85 C9 74 44 48 8D 4C", 3), 2);
@@ -909,3 +1253,17 @@ static HookFunction hookFunction([]()
 	hook::nop(hook::get_pattern("4D 85 C9 74 46 F3", 3), 2);
 	hook::nop(hook::get_pattern("4D 85 C9 74 11 48 85", 3), 2);
 });
+
+
+void CD_AllocateSyncData(uint16_t objectId)
+{
+	if (!rage::g_syncData[objectId])
+	{
+		rage::g_syncData[objectId] = std::make_unique<rage::NetObjectData>();
+	}
+}
+
+void CD_FreeSyncData(uint16_t objectId)
+{
+	rage::g_syncData[objectId] = {};
+}

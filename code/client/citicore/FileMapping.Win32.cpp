@@ -21,6 +21,8 @@
 #include <winternl.h>
 #include <commctrl.h>
 
+#include <CrossBuildRuntime.h>
+
 typedef wchar_t*(*MappingFunctionType)(const wchar_t*, void*(*)(size_t));
 
 static MappingFunctionType g_mappingFunction;
@@ -71,6 +73,16 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 		return MakeRelativeCitPath(L"cache\\game\\ros_profiles") + &wcsstr(origFileName, L"Social Club\\Profiles")[20];
 	}
 
+	if (wcsstr(origFileName, L"GTA V\\Profiles") != nullptr)
+	{
+		return MakeRelativeCitPath(L"cache\\game\\game_profiles") + &wcsstr(origFileName, L"GTA V\\Profiles")[14];
+	}
+
+	if (wcsstr(origFileName, L"Red Dead Redemption 2\\Profiles") != nullptr)
+	{
+		return MakeRelativeCitPath(L"cache\\game\\game_profiles") + &wcsstr(origFileName, L"ion 2\\Profiles")[14];
+	}
+
 	if (wcsstr(origFileName, L"version.txt") != nullptr)
 	{
 		return MakeRelativeCitPath(L"cache\\game\\version_orig.txt");
@@ -86,61 +98,84 @@ static std::wstring MapRedirectedFilename(const wchar_t* origFileName)
 		return MakeRelativeCitPath(L"nodontfuckingplaygtav.exe");
 	}
 
+	if (wcsstr(origFileName, L"NVIDIA Corporation\\NV_Cache") != nullptr)
+	{
+		return MakeRelativeCitPath(L"cache\\game\\") + &wcsstr(origFileName, L"NVIDIA Corporation\\NV_Cache")[19];
+	}
+
+	if (wcsstr(origFileName, L"Files\\Rockstar Games\\Launcher") != nullptr)
+	{
+		return MakeRelativeCitPath(L"cache\\game\\launcher") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+	}
+
 	if (wcsstr(origFileName, L"Data\\Rockstar Games\\Launcher") != nullptr)
 	{
-		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_data2") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_data3") + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (wcsstr(origFileName, L"Local\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherAppDataRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata2") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata3") + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (wcsstr(origFileName, L"Documents\\Rockstar Games\\Social Club") != nullptr || wcsstr(origFileName, g_scDocumentsRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"cache\\game\\ros_documents") + &wcsstr(origFileName, L"Games\\Social Club")[17];
+		return MakeRelativeCitPath(L"cache\\game\\ros_documents2") + &wcsstr(origFileName, L"Games\\Social Club")[17];
 	}
 
 	if (wcsstr(origFileName, L"Documents\\Rockstar Games\\Launcher") != nullptr || wcsstr(origFileName, g_launcherDocumentsRoot.c_str()) != nullptr)
 	{
-		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_documents") + &wcsstr(origFileName, L"Games\\Launcher")[14];
+		return MakeRelativeCitPath(L"cache\\game\\ros_launcher_documents2") + &wcsstr(origFileName, L"Games\\Launcher")[14];
 	}
 
 	if (getenv("CitizenFX_ToolMode"))
 	{
-		if (wcsstr(origFileName, L"Rockstar Games\\Red Dead Redemption 2") != nullptr)
+		if (wcsstr(origFileName, L".lnk"))
 		{
-			CreateDirectoryW(MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2").c_str(), NULL);
-
-			static std::wstring s;
-			s = MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2") + &wcsstr(origFileName, L"d Redemption 2")[14];
-			origFileName = s.c_str();
+			return MakeRelativeCitPath(L"cache\\game\\dummy.lnk");
 		}
-		else if (wcsstr(origFileName, L"Rockstar Games\\Grand Theft Auto V") != nullptr)
-		{
-			CreateDirectoryW(MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2").c_str(), NULL);
 
-			static std::wstring s;
-			s = MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2") + &wcsstr(origFileName, L"d Theft Auto V")[14];
-			origFileName = s.c_str();
-		}
-		else if (wcsstr(origFileName, L"Rockstar Games\\index.bin") != nullptr) // lol
-		{
-			CreateDirectoryW(MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2").c_str(), NULL);
+		auto gameDir = MakeRelativeCitPath(fmt::sprintf(L"cache\\game\\ros_launcher_game_%d", xbr::GetGameBuild()));
 
-			static std::wstring s;
-			s = MakeRelativeCitPath(L"cache\\game\\ros_launcher_game2") + &wcsstr(origFileName, L"Rockstar Games")[14];
-			origFileName = s.c_str();
-		}
-		else if (wcsstr(origFileName, L"Rockstar Games\\GTA5.exe") != nullptr || wcsstr(origFileName, L"Rockstar Games\\RDR2.exe") != nullptr)
+		if (wcsstr(origFileName, L".exe.part") != nullptr)
 		{
-			static std::wstring s;
+			return MakeRelativeCitPath(L"cache\\game\\dummy.exe.part");
+		}
+
+		if (wcsstr(origFileName, L"Rockstar Games\\GTA5.exe") != nullptr || wcsstr(origFileName, L"Rockstar Games\\RDR2.exe") != nullptr ||
+			wcsstr(origFileName, L"Grand Theft Auto V\\GTA5.exe") != nullptr || wcsstr(origFileName, L"Red Dead Redemption 2\\RDR2.exe") != nullptr)
+		{
+			static thread_local std::wstring s;
 #ifdef GTA_FIVE
 			s = MakeRelativeGamePath(L"GTA5.exe");
 #else
 			s = MakeRelativeGamePath(L"RDR2.exe");
 #endif
 			origFileName = s.c_str();
+		}
+		else if (wcsstr(origFileName, L"Rockstar Games\\Games") != nullptr)
+		{
+			CreateDirectoryW(gameDir.c_str(), NULL);
+			//CreateDirectoryW((gameDir + L"\\Grand Theft Auto V").c_str(), NULL);
+			//CreateDirectoryW((gameDir + L"\\Red Dead Redemption 2").c_str(), NULL);
+
+			return gameDir + &wcsstr(origFileName, L"ar Games\\Games")[14];
+		}
+		else if (wcsstr(origFileName, L"Rockstar Games\\Red Dead Redemption 2") != nullptr)
+		{
+			return gameDir + &wcsstr(origFileName, L"d Redemption 2")[14];
+		}
+		else if (wcsstr(origFileName, L"Rockstar Games\\Grand Theft Auto V") != nullptr)
+		{
+			CreateDirectoryW(gameDir.c_str(), NULL);
+
+			return gameDir + &wcsstr(origFileName, L"d Theft Auto V")[14];
+		}
+		else if (wcsstr(origFileName, L"Rockstar Games\\index.bin") != nullptr) // lol
+		{
+			CreateDirectoryW(gameDir.c_str(), NULL);
+
+			return gameDir + &wcsstr(origFileName, L"Rockstar Games")[14];
 		}
 	}
 
@@ -189,6 +224,11 @@ static bool IsMappedFilename(const std::wstring& fileName)
 		return true;
 	}
 
+	if (fileName.find(L"NVIDIA Corporation\\NV_Cache") != std::string::npos)
+	{
+		return true;
+	}
+
 	if (fileName.find(L"Data\\Local\\Rockstar Games\\Launcher") != std::string::npos ||
 		fileName.find(g_launcherAppDataRoot) != std::string::npos)
 	{
@@ -227,6 +267,11 @@ static bool IsMappedFilename(const std::wstring& fileName)
 		return true;
 	}
 
+	if (wcsstr(fileName.c_str(), L"GTA V\\Profiles") != nullptr || wcsstr(fileName.c_str(), L"Redemption 2\\Profiles") != nullptr)
+	{
+		return true;
+	}
+
 	if (wcsstr(fileName.c_str(), L"PlayGTAV.exe") != nullptr)
 	{
 		return true;
@@ -239,11 +284,25 @@ static bool IsMappedFilename(const std::wstring& fileName)
 
 	if (getenv("CitizenFX_ToolMode"))
 	{
+		if (wcsstr(fileName.c_str(), L"Auto V.lnk") != nullptr || wcsstr(fileName.c_str(), L"ion 2.lnk") != nullptr)
+		{
+			return true;
+		}
+
+		if (wcsstr(fileName.c_str(), L".exe.part") != nullptr)
+		{
+			return true;
+		}
+
 		if (wcsstr(fileName.c_str(), L"Rockstar Games\\Red Dead Redemption 2") != nullptr)
 		{
 			return true;
 		}
 		else if (wcsstr(fileName.c_str(), L"Rockstar Games\\Grand Theft Auto V") != nullptr)
+		{
+			return true;
+		}
+		else if (wcsstr(fileName.c_str(), L"Rockstar Games\\Games") != nullptr)
 		{
 			return true;
 		}
@@ -303,10 +362,14 @@ NTSTATUS NTAPI LdrLoadDllStub(const wchar_t* fileName, uint32_t* flags, UNICODE_
 	if (moduleNameStr.find(L"fraps64.dll") != std::string::npos || moduleNameStr.find(L"avghooka.dll") != std::string::npos ||
 		// apparently crashes NUI
 		moduleNameStr.find(L"bdcam64.dll") != std::string::npos ||
+		// ASUS/A-Volute/Nahimic audio software
+		moduleNameStr.find(L"A-Volute") != std::string::npos || moduleNameStr.find(L"AudioDevProps") != std::string::npos ||
+		// Canon camera software
+		moduleNameStr.find(L"EDSDK.dll") != std::string::npos ||
 		// lots of crashes occur in the DiscordApp overlay
-		moduleNameStr.find(L"overlay.x64.dll") != std::string::npos ||
+		//moduleNameStr.find(L"overlay.x64.dll") != std::string::npos ||
 		// new DiscordApp overlay name :/
-		moduleNameStr.find(L"DiscordHook64.dll") != std::string::npos ||
+		//moduleNameStr.find(L"DiscordHook64.dll") != std::string::npos ||
 		// HideMyIP, causes LoopbackTcpServer and libuv to crash
 		moduleNameStr.find(L"hmipcore64.dll") != std::string::npos ||
 		// NVIDIA SHARE/ShadowPlay capture DLL, high correlation with ERR_GFX_D3D_INIT failures
@@ -314,6 +377,8 @@ NTSTATUS NTAPI LdrLoadDllStub(const wchar_t* fileName, uint32_t* flags, UNICODE_
 		// Proxifier, causes LoopbackTcpServer crashes
 		moduleNameStr.find(L"PrxerNsp.dll") != std::string::npos ||
 		moduleNameStr.find(L"PrxerDrv.dll") != std::string::npos ||
+		// Steam 'crashhandler64.dll', optional library that has a broken GetProcessHeap call
+		moduleNameStr.find(L"crashhandler64.dll") != std::string::npos ||
 		// Ad Muncher, causes LoopbackTcpServer to crash
 		moduleNameStr.find(L"am64-34121.dll") != std::string::npos ||
 #if !defined(IS_RDR3)
@@ -413,9 +478,9 @@ NTSTATUS WINAPI NtCreateFileStub(PHANDLE fileHandle, ACCESS_MASK desiredAccess, 
 			attributes.ObjectName = &newString;
 		}
 
-		NTSTATUS retval = g_origNtCreateFile(fileHandle, desiredAccess, &attributes, ioBlock, allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
-
 		tls->inCreateFile = false;
+
+		NTSTATUS retval = g_origNtCreateFile(fileHandle, desiredAccess, &attributes, ioBlock, allocationSize, fileAttributes, shareAccess, createDisposition, createOptions, eaBuffer, eaLength);
 
 		return retval;
 	}
@@ -451,9 +516,9 @@ NTSTATUS WINAPI NtOpenFileStub(PHANDLE fileHandle, ACCESS_MASK desiredAccess, PO
 			attributes.ObjectName = &newString;
 		}
 
-		NTSTATUS retval = g_origNtOpenFile(fileHandle, desiredAccess, &attributes, ioBlock, shareAccess, openOptions);
-
 		tls->inOpenFile = false;
+
+		NTSTATUS retval = g_origNtOpenFile(fileHandle, desiredAccess, &attributes, ioBlock, shareAccess, openOptions);
 
 		return retval;
 	}
@@ -489,9 +554,9 @@ NTSTATUS WINAPI NtDeleteFileStub(POBJECT_ATTRIBUTES objectAttributes)
 			attributes.ObjectName = &newString;
 		}
 
-		NTSTATUS retval = g_origNtDeleteFile(&attributes);
-
 		tls->inDeleteFile = false;
+
+		NTSTATUS retval = g_origNtDeleteFile(&attributes);
 
 		return retval;
 	}
@@ -527,9 +592,9 @@ NTSTATUS WINAPI NtQueryAttributesFileStub(POBJECT_ATTRIBUTES objectAttributes, v
 			attributes.ObjectName = &newString;
 		}
 
-		NTSTATUS retval = g_origNtQueryAttributesFile(&attributes, basicInformation);
-
 		tls->inQueryAttributes = false;
+
+		NTSTATUS retval = g_origNtQueryAttributesFile(&attributes, basicInformation);
 
 		return retval;
 	}

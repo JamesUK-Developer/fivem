@@ -28,6 +28,8 @@
 #include <CfxRect.h>
 #include <DrawCommands.h>
 
+#include <CrossBuildRuntime.h>
+
 #include <Error.h>
 
 static std::shared_ptr<ConVar<bool>> g_loadProfileConvar;
@@ -114,6 +116,8 @@ static LoadsThread loadsThread;
 static bool autoShutdownNui = true;
 static fx::TNativeHandler g_origShutdown;
 
+#include <nutsnbolts.h>
+
 static HookFunction hookFunction([]()
 {
 	rage::scrEngine::OnScriptInit.Connect([]()
@@ -138,7 +142,8 @@ static HookFunction hookFunction([]()
 
 			if (!handler)
 			{
-				FatalError("Couldn't find SHUTDOWN_LOADING_SCREEN to hook!");
+				trace("Couldn't find SHUTDOWN_LOADING_SCREEN to hook!\n");
+				return;
 			}
 
 			g_origShutdown = *handler;
@@ -195,21 +200,19 @@ static HookFunction hookFunction([]()
 			// override LOAD_ALL_OBJECTS_NOW
 			auto handler = fx::ScriptEngine::GetNativeHandler(0xBD6E84632DD4CB3F);
 
-			if (!handler)
+			if (handler)
 			{
-				FatalError("Couldn't find LOAD_ALL_OBJECTS_NOW to hook!");
-			}
-
-			fx::ScriptEngine::RegisterNativeHandler(0xBD6E84632DD4CB3F, [=](fx::ScriptContext& ctx)
-			{
-				if (!endedLoadingScreens)
+				fx::ScriptEngine::RegisterNativeHandler(0xBD6E84632DD4CB3F, [=](fx::ScriptContext& ctx)
 				{
-					trace("Skipping LOAD_ALL_OBJECTS_NOW as loading screens haven't ended yet!\n");
-					return;
-				}
+					if (!endedLoadingScreens)
+					{
+						trace("Skipping LOAD_ALL_OBJECTS_NOW as loading screens haven't ended yet!\n");
+						return;
+					}
 
-				(*handler)(ctx);
-			});
+					(*handler)(ctx);
+				});
+			}
 		}
 
 		{
@@ -363,7 +366,7 @@ void LoadsThread::DoRun()
 		NativeInvoke::Invoke<0x07E5B515DB0636FC, int>(true, false, 0, false, false);
 
 		// LOAD_SCENE(?)
-		NativeInvoke::Invoke<0x4448EB75B4904BDB, int>(-2153.641f, 4597.957f, 116.662f);
+		//NativeInvoke::Invoke<0x4448EB75B4904BDB, int>(-2153.641f, 4597.957f, 116.662f);
 
 		// SHUTDOWN_LOADING_SCREEN
 		fx::ScriptContextBuffer ctx;

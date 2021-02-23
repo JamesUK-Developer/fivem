@@ -1,6 +1,11 @@
 #pragma once
 
 #include <atArray.h>
+#include <atPool.h>
+
+#include <Pool.h>
+
+#include <boost/type_index/ctti_type_index.hpp>
 
 #include <directxmath.h>
 
@@ -232,7 +237,10 @@ class STREAMING_EXPORT fwEntity : public rage::fwRefAwareBase
 public:
 	virtual ~fwEntity() = default;
 
-	virtual bool IsOfType(uint32_t hash) = 0;
+	inline bool IsOfType(uint32_t hash)
+	{
+		return IsOfTypeH(hash);
+	}
 
 	inline fwArchetype* GetArchetype()
 	{
@@ -256,62 +264,90 @@ public:
 		return reinterpret_cast<T*>(this->IsOfType(HashString(boost::typeindex::type_id<T>().pretty_name().substr(6).c_str())));
 	}
 
-	virtual void m_10() = 0;
+private:
+	template<typename TMember>
+	inline static TMember get_member(void* ptr)
+	{
+		union member_cast
+		{
+			TMember function;
+			struct  
+			{
+				void* ptr;
+				uintptr_t off;
+			};
+		};
 
-	virtual void m_18() = 0;
+		member_cast cast;
+		cast.ptr = ptr;
+		cast.off = 0;
 
-	virtual void m_20() = 0;
+		return cast.function;
+	} 
 
-	virtual void m_28() = 0;
+public:
 
-	virtual void m_30() = 0;
+#define FORWARD_FUNC(name, offset, ...) \
+	using TFn = decltype(&fwEntity::name); \
+	void** vtbl = *(void***)(this); \
+	return (this->*(get_member<TFn>(vtbl[(offset / 8) + ((offset > 0x10) ? (xbr::IsGameBuildOrGreater<2189>() ? 1 : 0) : 0)])))(__VA_ARGS__);
 
-	virtual void SetupFromEntityDef(fwEntityDef* entityDef, fwArchetype* archetype, uint32_t) = 0;
+private:
+	inline bool IsOfTypeH(uint32_t hash)
+	{
+		if (xbr::IsGameBuildOrGreater<2189>())
+		{
+			return IsOfTypeRef(hash);
+		}
 
-	virtual void SetModelIndex(uint32_t* mi) = 0;
+		FORWARD_FUNC(IsOfTypeH, 0x8, hash);
+	}
 
-	virtual void m_48() = 0;
-	virtual void m_50() = 0;
-	virtual void m_58() = 0;
-	virtual void m_60() = 0;
-	virtual void m_68() = 0;
-	virtual void m_70() = 0;
-	virtual void m_78() = 0;
-	virtual void m_80() = 0;
-	virtual void m_88() = 0;
-	virtual void m_90() = 0;
-	virtual void m_98() = 0;
-	virtual void m_a0() = 0;
-	virtual void m_a8() = 0;
-	virtual void m_b0() = 0;
-	virtual void SetTransform(const Matrix4x4& matrix, bool updateScene) = 0;
-	virtual void UpdateTransform(const Matrix4x4& matrix, bool updateScene) = 0;
-	virtual void m_c8() = 0;
-	virtual void m_d0() = 0;
-	virtual void m_d8() = 0;
-	virtual void m_e0() = 0;
-	virtual void m_e8() = 0;
-	virtual void m_f0() = 0;
-	virtual void m_f8() = 0;
-	virtual void m_100() = 0;
-	virtual void m_108() = 0;
-	virtual void AddToSceneWrap() = 0;
-	virtual void AddToScene() = 0;
-	virtual void RemoveFromScene() = 0; // ?
-	virtual void m_128() = 0;
-	virtual void m_130() = 0;
-	virtual void m_138() = 0;
-	virtual void m_140() = 0;
-	virtual void m_148() = 0;
-	virtual void m_150() = 0;
-	virtual void m_158() = 0;
-	virtual void m_160() = 0;
-	virtual void m_168() = 0;
-	virtual void m_170() = 0;
-	virtual void m_178() = 0;
-	virtual void m_180() = 0;
-	virtual void m_188() = 0;
-	virtual float GetRadius() = 0;
+	inline bool IsOfTypeRef(const uint32_t& hash)
+	{
+		FORWARD_FUNC(IsOfTypeRef, 0x8, hash);
+	}
+
+public:
+	inline void SetupFromEntityDef(fwEntityDef* entityDef, fwArchetype* archetype, uint32_t a3)
+	{
+		FORWARD_FUNC(SetupFromEntityDef, 0x38, entityDef, archetype, a3);
+	}
+
+	inline void SetModelIndex(uint32_t* mi)
+	{
+		FORWARD_FUNC(SetModelIndex, 0x40, mi);
+	}
+
+	inline void SetTransform(const Matrix4x4& matrix, bool updateScene)
+	{
+		FORWARD_FUNC(SetTransform, 0xb8, matrix, updateScene);
+	}
+
+	inline void UpdateTransform(const Matrix4x4& matrix, bool updateScene)
+	{
+		FORWARD_FUNC(UpdateTransform, 0xc0, matrix, updateScene);
+	}
+
+	inline void AddToSceneWrap()
+	{
+		FORWARD_FUNC(AddToSceneWrap, 0x110);
+	}
+
+	inline void AddToScene()
+	{
+		FORWARD_FUNC(AddToScene, 0x118);
+	}
+
+	inline void RemoveFromScene()
+	{
+		FORWARD_FUNC(AddToSceneWrap, 0x120);
+	}
+
+	inline float GetRadius()
+	{
+		FORWARD_FUNC(GetRadius, 0x190);
+	}
 
 public:
 	inline const Matrix4x4& GetTransform() const
@@ -330,12 +366,18 @@ public:
 		return m_netObject;
 	}
 
+	inline uint8_t GetType() const
+	{
+		return m_entityType;
+	}
+
 private:
 	char m_pad[8];
 	fwExtensionList m_extensionList;
 	char m_pad2[8];
 	fwArchetype* m_archetype;
-	char m_pad3[96 - 40];
+	uint8_t m_entityType;
+	char m_pad3[96 - 41];
 	Matrix4x4 m_transform;
 	char m_pad4[48];
 	void* m_netObject;
@@ -365,29 +407,85 @@ private:
 	fwEntity* m_occupants[16];
 };
 
+struct CHandlingObject
+{
+	// boost::typeindex::ctti_type_index doesn't expose a string_view :(
+	static constexpr uint32_t kHash = HashString("CHandlingObject");
+};
 
-class CBaseSubHandlingData
+template<typename TPoolName>
+struct PoolAllocated
+{
+public:
+	inline void* operator new(size_t size)
+	{
+		return rage::PoolAllocate(rage::GetPoolBase(TPoolName::kHash));
+	}
+
+	inline void* operator new[](size_t size)
+	{
+		return PoolAllocated::operator new(size);
+	}
+
+	inline void operator delete(void* memory)
+	{
+		rage::PoolRelease(rage::GetPoolBase(TPoolName::kHash), memory);
+	}
+
+	inline void operator delete[](void* memory)
+	{
+		return PoolAllocated::operator delete(memory);
+	}
+};
+
+class CBaseSubHandlingData : public PoolAllocated<CHandlingObject>
 {
 public:
 	virtual ~CBaseSubHandlingData() = default;
 	virtual void* GetParser() = 0;
-	virtual int GetUnk() = 0;
+	virtual int GetTypeIndex() = 0;
 	virtual void ProcessOnLoad() = 0;
 };
 
-class CHandlingData
+struct CAdvancedData : public rage::sysUseAllocator
+{
+	void* vtbl;
+	uint8_t pad[16];
+};
+
+class CCarHandlingData2060 : public CBaseSubHandlingData
+{
+private:
+	char pad[64 - 8];
+
+public:
+	atArray<CAdvancedData> AdvancedData;
+};
+
+struct BoardingPointData : public rage::sysUseAllocator
+{
+	uint8_t m_pad[132];
+};
+
+class CHandlingData : public PoolAllocated<CHandlingObject>
 {
 private:
 	uint32_t m_name;
-	char m_pad[332]; // 1290, 1365, 1493, 1604, 1868, 2060
-	atArray<CBaseSubHandlingData*> m_subHandlingData;
+	char m_pad[316]; // 1290, 1365, 1493, 1604, 1868, 2060
+	BoardingPointData* m_boardingPoints;
+	char m_pad2[8];
+	atArray<CBaseSubHandlingData*> m_subHandlingData; // +344?
 	// ^ find offset using a variant of 48 85 C9 74 13 BA 04 00 00 00 E8 (and go to the call in there)
-	char m_pad2[1000];
+	char m_pad3[1000];
 
 public:
 	CHandlingData(CHandlingData* orig)
 	{
-		memcpy(this, orig, sizeof(*this));
+		static_assert(offsetof(CHandlingData, m_boardingPoints) == 328, "m_boardingPoints");
+		static_assert(offsetof(CHandlingData, m_subHandlingData) == 344, "m_subHandlingData");
+
+		static auto pool = rage::GetPoolBase(CHandlingObject::kHash);
+		memcpy(this, orig, pool->GetEntrySize());
 
 		CBaseSubHandlingData* shds[6] = { 0 };
 
@@ -395,13 +493,27 @@ public:
 		{
 			if (m_subHandlingData.Get(i))
 			{
-				shds[i] = (CBaseSubHandlingData*)rage::GetAllocator()->allocate(1024, 16, 0);
-				memcpy(shds[i], m_subHandlingData.Get(i), 1024);
+				shds[i] = (CBaseSubHandlingData*)rage::PoolAllocate(pool);
+				memcpy(shds[i], m_subHandlingData.Get(i), pool->GetEntrySize());
+
+				if (xbr::IsGameBuildOrGreater<2060>())
+				{
+					// CCarHandlingData
+					if (shds[i]->GetTypeIndex() == 8)
+					{
+						auto origChd = static_cast<CCarHandlingData2060*>(m_subHandlingData.Get(i));
+						auto chd = static_cast<CCarHandlingData2060*>(shds[i]);
+
+						chd->AdvancedData.m_offset = 0;
+						chd->AdvancedData = origChd->AdvancedData;
+					}
+				}
 			}
 		}
 
 		m_subHandlingData.m_offset = nullptr;
 		m_subHandlingData.Clear();
+		m_subHandlingData.Expand(6);
 
 		m_subHandlingData.Set(0, shds[0]);
 		m_subHandlingData.Set(1, shds[1]);
@@ -409,6 +521,12 @@ public:
 		m_subHandlingData.Set(3, shds[3]);
 		m_subHandlingData.Set(4, shds[4]);
 		m_subHandlingData.Set(5, shds[5]);
+
+		if (orig->m_boardingPoints)
+		{
+			m_boardingPoints = new BoardingPointData();
+			memcpy(m_boardingPoints, orig->m_boardingPoints, sizeof(*m_boardingPoints));
+		}
 	}
 
 	virtual ~CHandlingData() = default;
@@ -450,7 +568,7 @@ public:
 
 	inline CHandlingData* GetHandlingData()
 	{
-		if (Is2060())
+		if (xbr::IsGameBuildOrGreater<2060>())
 		{
 			return impl.m2060.m_handlingData;
 		}
@@ -465,7 +583,7 @@ public:
 		// Use an alignment byte within CHandlingDataMgr to represent the handling as hooked.
 		*((char*)ptr + 28) = 1;
 		
-		if (Is2060())
+		if (xbr::IsGameBuildOrGreater<2060>())
 		{
 			impl.m2060.m_handlingData = ptr;
 		}

@@ -24,11 +24,13 @@
 // hacky include path to not conflict with our own NetBuffer.h
 #include <../../components/net-base/include/NetBuffer.h>
 
+#ifdef COMPILING_NET
 #include <enet/enet.h>
+#endif
 
 #include <concurrent_queue.h>
 
-#define NETWORK_PROTOCOL 9
+#define NETWORK_PROTOCOL 10
 
 enum NetAddressType
 {
@@ -57,7 +59,11 @@ public:
 	NetAddress(const sockaddr* addr);
 	NetAddress(const sockaddr_in* addr) : NetAddress((const sockaddr*)addr) {}
 	NetAddress(const sockaddr_in6* addr) : NetAddress((const sockaddr*)addr) {}
+
+#ifdef COMPILING_NET
 	NetAddress(const ENetAddress* addr);
+#endif
+
 	NetAddress(const char* address, uint16_t port);
 
 	bool operator==(const NetAddress& right) const;
@@ -69,7 +75,9 @@ public:
 
 	void GetSockAddr(sockaddr_storage* addr, int* addrLen) const;
 
+#ifdef COMPILING_NET
 	ENetAddress GetENetAddress() const;
+#endif
 };
 
 #include "NetBuffer.h"
@@ -294,6 +302,8 @@ public:
 		return m_serverTime;
 	}
 
+	int32_t GetPing();
+
 	void SetMetricSink(fwRefContainer<INetMetricSink>& sink);
 
 	virtual void AddReceiveTick() override;
@@ -309,6 +319,8 @@ public:
 		__declspec(dllimport)
 #endif
 		fwEvent<NetLibrary*> OnNetLibraryCreate;
+
+	fwEvent<int> OnRequestBuildSwitch;
 
 	fwEvent<const char*> OnAttemptDisconnect;
 
@@ -343,7 +355,8 @@ public:
 	fwEvent<const std::string&, const std::function<void()>&> OnInterceptConnection;
 
 	// same as the other routine, except it's for authentication
-	fwEvent<const std::string&, const std::function<void(bool success, const std::map<std::string, std::string>& additionalPostData)>&> OnInterceptConnectionForAuth;
+	// a2 -> license key token
+	fwEvent<const std::string&, const std::string&, const std::function<void(bool success, const std::map<std::string, std::string>& additionalPostData)>&> OnInterceptConnectionForAuth;
 
 	// event to intercept server events for debugging
 	// a1: event name

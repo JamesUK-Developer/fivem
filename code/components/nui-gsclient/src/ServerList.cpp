@@ -15,6 +15,7 @@
 #include <array>
 
 #include <CoreConsole.h>
+#include <InternalRPCHandler.h>
 
 #include <NetAddress.h> // net:base
 
@@ -503,7 +504,7 @@ void GSClient_PollSocket(SOCKET socket)
 
 			if (error != WSAEWOULDBLOCK)
 			{
-				trace("recv() failed - %d\n", error);
+				console::DPrintf("nui:gsclient", "recv() failed - %d\n", error);
 			}
 
 			return;
@@ -670,6 +671,15 @@ void GSClient_QueryOneServer(const std::wstring& arg)
 	}
 }
 
+DWORD WINAPI GSClient_QueryOneServerWrap(LPVOID ctx)
+{
+	auto str = (std::wstring*)ctx;
+	GSClient_QueryOneServer(*str);
+	delete str;
+
+	return 0;
+}
+
 void GSClient_Ping(const std::wstring& arg)
 {
 	g_cls.isOneQuery = false;
@@ -757,6 +767,101 @@ void GSClient_SaveFavorites(const wchar_t *json)
 
 static InitFunction initFunction([] ()
 {
+	nui::RPCHandlerManager* rpcHandlerManager = Instance<nui::RPCHandlerManager>::Get();
+	rpcHandlerManager->RegisterEndpoint("gsclient", [](std::string functionName, std::string arguments, std::map<std::string, std::string> postMap, nui::RPCHandlerManager::TCallbackFn cb)
+	{
+		if (!nui::HasMainUI())
+		{
+			cb("null");
+			return;
+		}
+
+		if (functionName == "url" || functionName == "dynamic")
+		{
+			auto urlEntry = postMap["url"];
+
+			struct Context
+			{
+				decltype(cb) cb;
+				decltype(urlEntry) url;
+				decltype(functionName) functionName;
+			};
+
+			QueueUserWorkItem([](LPVOID cxt) -> DWORD
+			{
+				auto c = (Context*)cxt;
+
+				// if not starting with 'http'
+				if (c->url.find("http") != 0)
+				{
+					auto peerAddress = net::PeerAddress::FromString(c->url, 30120, net::PeerAddress::LookupType::ResolveWithService);
+
+					if (peerAddress)
+					{
+						c->url = "https://" + peerAddress->ToString();
+					}
+				}
+
+				if (c->functionName == "dynamic")
+				{
+					c->url += "/dynamic.json";
+				}
+
+				// request it
+				HttpRequestOptions options;
+				auto rhl = std::make_shared<HttpHeaderList>();
+				options.responseHeaders = rhl;
+				options.followLocation = false;
+
+				Instance<HttpClient>::Get()->DoGetRequest(c->url, options, [rhl, c](bool success, const char* data, size_t length)
+				{
+					if (c->functionName == "dynamic")
+					{
+						auto cb = std::move(c->cb);
+						delete c;
+
+						if (success)
+						{
+							cb(std::string(data, length));
+						}
+						else
+						{
+							cb("null");
+						}
+
+						return;
+					}
+
+					auto cb = std::move(c->cb);
+					delete c;
+
+					if (auto it = rhl->find("location"); it != rhl->end())
+					{
+						if (it->second.find("https://cfx.re/join/") == 0)
+						{
+							cb(it->second.substr(20));
+						}
+						else
+						{
+							cb(it->second);
+						}
+
+						return;
+					}
+
+					cb("");
+				});
+
+				return 0;
+			},
+			new Context{ cb, urlEntry, functionName }, 0);
+
+			return;
+		}
+
+		cb("null");
+	});
+
 	ui_maxQueriesPerMinute = std::make_unique<ConVar<int>>("ui_maxQueriesPerMinute", ConVar_Archive, 5000);
 
 	CreateDirectory(MakeRelativeCitPath(L"cache\\servers\\").c_str(), nullptr);
@@ -777,9 +882,9 @@ static InitFunction initFunction([] ()
 
 		if (!_wcsicmp(type, L"queryServer"))
 		{
-			trace("Pinging specified server...\n");
+			console::DPrintf("nui:gsclient", "Pinging specified server...\n");
 
-			GSClient_QueryOneServer(arg);
+			QueueUserWorkItem(GSClient_QueryOneServerWrap, new std::wstring(arg), 0);
 		}
 
 		if (!_wcsicmp(type, L"getFavorites"))

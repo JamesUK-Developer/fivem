@@ -31,6 +31,12 @@ ResourceUI::~ResourceUI()
 
 bool ResourceUI::Create()
 {
+	// initialize callback handlers
+	auto resourceName = m_resource->GetName();
+	std::transform(resourceName.begin(), resourceName.end(), resourceName.begin(), ::ToLower);
+	CefRegisterSchemeHandlerFactory("http", resourceName, Instance<NUISchemeHandlerFactory>::Get());
+	CefRegisterSchemeHandlerFactory("https", resourceName, Instance<NUISchemeHandlerFactory>::Get());
+
 	// get the metadata component
 	fwRefContainer<fx::ResourceMetaDataComponent> metaData = m_resource->GetComponent<fx::ResourceMetaDataComponent>();
 
@@ -56,12 +62,6 @@ bool ResourceUI::Create()
 
 	// get the page name from the iterator
 	std::string pageName = uiPageData.begin()->second;
-
-	// initialize the page
-	auto resourceName = m_resource->GetName();
-	std::transform(resourceName.begin(), resourceName.end(), resourceName.begin(), ::ToLower);
-	CefRegisterSchemeHandlerFactory("http", resourceName, Instance<NUISchemeHandlerFactory>::Get());
-	CefRegisterSchemeHandlerFactory("https", resourceName, Instance<NUISchemeHandlerFactory>::Get());
 	CefRegisterSchemeHandlerFactory("https", "cfx-nui-" + resourceName, Instance<NUISchemeHandlerFactory>::Get());
 
 	// create the NUI frame
@@ -69,6 +69,12 @@ bool ResourceUI::Create()
 	auto uiPrefix = (!rmvRes || !*rmvRes) ? "nui://" : "https://cfx-nui-";
 
 	std::string path = uiPrefix + m_resource->GetName() + "/" + pageName;
+
+	// allow direct mentions of absolute URIs
+	if (pageName.find("://") != std::string::npos)
+	{
+		path = pageName;
+	}
 
 	auto uiPagePreloadData = metaData->GetEntries("ui_page_preload");
 	bool uiPagePreload = std::distance(uiPagePreloadData.begin(), uiPagePreloadData.end()) > 0;
@@ -103,18 +109,26 @@ void ResourceUI::AddCallback(const std::string& type, ResUICallback callback)
 	m_callbacks.insert({ type, callback });
 }
 
-bool ResourceUI::InvokeCallback(const std::string& type, const std::string& data, ResUIResultCallback resultCB)
+bool ResourceUI::InvokeCallback(const std::string& type, const std::multimap<std::string, std::string>& headers, const std::string& data, ResUIResultCallback resultCB)
 {
 	auto set = fx::GetIteratorView(m_callbacks.equal_range(type));
 
 	if (set.begin() == set.end())
 	{
-		return false;
+		// try mapping only the first part
+		auto firstType = type.substr(0, type.find_first_of('/'));
+
+		set = fx::GetIteratorView(m_callbacks.equal_range(firstType));
+
+		if (set.begin() == set.end())
+		{
+			return false;
+		}
 	}
 
 	for (auto& cb : set)
 	{
-		cb.second(data, resultCB);
+		cb.second(type, headers, data, resultCB);
 	}
 
 	return true;
@@ -134,7 +148,7 @@ static InitFunction initFunction([] ()
 {
 	fx::ResourceManager::OnInitializeInstance.Connect([](fx::ResourceManager* manager)
 	{
-		nui::SetResourceLookupFunction([manager](const std::string& resourceName)
+		nui::SetResourceLookupFunction([manager](const std::string& resourceName, const std::string& fileName) -> std::string
 		{
 			auto resource = manager->GetResource(resourceName);
 
@@ -147,10 +161,59 @@ static InitFunction initFunction([] ()
 					path += "/";
 				}
 
-				return path;
+				// check if it's a client script of any sorts
+				std::stringstream normalFileName;
+				char lastC = '/';
+
+				for (size_t i = 0; i < fileName.length(); i++)
+				{
+					char c = fileName[i];
+
+					if (c != '/' || lastC != '/')
+					{
+						normalFileName << c;
+					}
+
+					lastC = c;
+				}
+
+				auto nfn = normalFileName.str();
+
+				auto mdComponent = resource->GetComponent<fx::ResourceMetaDataComponent>();
+				bool valid = false;
+
+				if (nfn == "__resource.lua" || nfn == "fxmanifest.lua")
+				{
+					return "common:/data/gameconfig.xml";
+				}
+				
+				for (auto& entry : mdComponent->GlobEntriesVector("client_script"))
+				{
+					if (nfn == entry)
+					{
+						auto files = mdComponent->GlobEntriesVector("file");
+						bool isFile = false;
+
+						for (auto& fileEntry : files)
+						{
+							if (nfn == fileEntry)
+							{
+								isFile = true;
+								break;
+							}
+						}
+
+						if (!isFile)
+						{
+							return "common:/data/gameconfig.xml";
+						}
+					}
+				}
+
+				return path + fileName;
 			}
 
-			return fmt::sprintf("resources:/%s/", resourceName);
+			return fmt::sprintf("resources:/%s/%s", resourceName, fileName);
 		});
 	});
 

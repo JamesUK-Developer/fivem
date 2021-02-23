@@ -66,25 +66,31 @@ void* SteamLoader::GetProcAddressInternal(const char* name)
 
 bool SteamLoader::IsSteamRunning(bool ignoreCreateFunc)
 {
-	bool retval = false;
-	uint32_t pid = GetSteamProcessId();
-
-	if (pid != 0)
+	static auto retval = ([this]()
 	{
-		HANDLE steamProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		bool retval = false;
 
-		if (steamProcess != INVALID_HANDLE_VALUE)
+		uint32_t pid = GetSteamProcessId();
+
+		if (pid != 0)
 		{
-			CloseHandle(steamProcess);
+			HANDLE steamProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 
-			retval = true;
+			if (steamProcess != INVALID_HANDLE_VALUE)
+			{
+				CloseHandle(steamProcess);
+
+				retval = true;
+			}
 		}
-	}
+
+		return retval;
+	})();
 
 	// safety check to see if CreateInterface is callable
 	if (!GetCreateInterfaceFunc() && !ignoreCreateFunc)
 	{
-		retval = false;
+		return false;
 	}
 
 	return retval;

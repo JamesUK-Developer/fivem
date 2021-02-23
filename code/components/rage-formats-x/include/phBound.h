@@ -124,7 +124,7 @@ struct phBoundMaterial1
 	uint16_t f13 : 1; // "sidewalk spec 3"
 	uint16_t seeThrough : 1;
 	uint16_t f15 : 1;
-#elif defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_PAYNE) || defined(RAGE_FORMATS_GAME_RDR3)
+#elif defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_PAYNE)
 	uint8_t proceduralId;
 
 	// TODO: double-check order
@@ -139,6 +139,12 @@ struct phBoundMaterial1
 	uint8_t walkablePath : 1;
 	uint8_t noCamCollision : 1;
 	uint8_t shootThroughFx : 1;
+#elif defined(RAGE_FORMATS_GAME_RDR3)
+	uint8_t unk1;
+	uint8_t unk2;
+
+	uint8_t roomId : 5;
+	uint8_t unk3 : 3;
 #endif
 };
 
@@ -235,9 +241,11 @@ public:
 
 #if defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_RDR3)
 		m_material.materialIdx = 0;
+		m_material.roomId = 0;
+
+#if !defined(RAGE_FORMATS_GAME_RDR3)
 		m_material.pedDensity = 0;
 		m_material.proceduralId = 0;
-		m_material.roomId = 0;
 		m_material.stairs = 0;
 		m_material.seeThrough = 0;
 		m_material.blockClimb = 0;
@@ -247,7 +255,6 @@ public:
 		m_material.noCamCollision = 0;
 		m_material.shootThroughFx = 0;
 
-#if !defined(RAGE_FORMATS_GAME_RDR3)
 		m_material2.noDecal = 0;
 		m_material2.noNavmesh = 0;
 		m_material2.noRagdoll = 0;
@@ -984,9 +991,9 @@ private:
 #endif
 
 #if defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_RDR3)
-	pgPtr<void> m_unkPtr3;
+	pgPtr<void> m_octantData;
 
-	pgPtr<pgPtr<void>> m_unkPtr4;
+	pgPtr<pgPtr<void>> m_octants;
 #elif defined(RAGE_FORMATS_GAME_NY)
 	uint8_t m_val;
 	uint8_t m_polyPad[3];
@@ -1098,8 +1105,8 @@ public:
 #endif
 
 #ifdef RAGE_FORMATS_GAME_FIVE
-		m_unkPtr3.Resolve(blockMap);
-		m_unkPtr4.Resolve(blockMap);
+		m_octantData.Resolve(blockMap);
+		m_octants.Resolve(blockMap);
 #endif
 	}
 
@@ -1112,6 +1119,14 @@ public:
 	{
 		return *m_polyEntries;
 	}
+
+#if defined(RAGE_FORMATS_GAME_FIVE) || defined(RAGE_FORMATS_GAME_RDR3)
+	inline void ClearOctantMap()
+	{
+		m_octants = nullptr;
+		m_octantData = nullptr;
+	}
+#endif
 };
 
 class phBoundGeometry : public phBoundPolyhedron

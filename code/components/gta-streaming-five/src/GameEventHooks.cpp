@@ -39,24 +39,31 @@ void* HandleEventWrap(void* group, rage::fwEvent* event)
 {
 	if (event)
 	{
-		const char* eventName = typeid(*event).name();
-
-		GameEventMetaData data = { 0 };
-		strcpy(data.name, &eventName[6]);
-		data.numArguments = 0;
-
-		// brute-force the argument count
-		// since these functions should early exit, most cost here will be VMT dispatch
-		for (int i = 0; i < _countof(data.arguments); i++)
+		try
 		{
-			if (event->GetArguments(data.arguments, i * sizeof(uintptr_t)))
-			{
-				data.numArguments = i;
-				break;
-			}
-		}
+			const char* eventName = typeid(*event).name();
 
-		OnTriggerGameEvent(data);
+			GameEventMetaData data = { 0 };
+			strcpy(data.name, &eventName[6]);
+			data.numArguments = 0;
+
+			// brute-force the argument count
+			// since these functions should early exit, most cost here will be VMT dispatch
+			for (int i = 0; i < _countof(data.arguments); i++)
+			{
+				if (event->GetArguments(data.arguments, i * sizeof(uintptr_t)))
+				{
+					data.numArguments = i;
+					break;
+				}
+			}
+
+			OnTriggerGameEvent(data);
+		}
+		catch (std::exception& e)
+		{
+		
+		}
 	}
 
 	return (*TFunc)(group, event);

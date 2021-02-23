@@ -8,13 +8,29 @@
 #include <ServerInstanceBase.h>
 #include <ComponentHolder.h>
 
-#include <tbb/concurrent_unordered_map.h>
-
 #ifdef COMPILING_CITIZEN_SERVER_NET
 #define CSNET_EXPORT DLL_EXPORT
 #else
 #define CSNET_EXPORT DLL_IMPORT
 #endif
+
+namespace fx
+{
+bool CSNET_EXPORT IsProxyAddress(std::string_view ep);
+
+bool CSNET_EXPORT IsProxyAddress(const net::PeerAddress& ep);
+}
+
+namespace tbb
+{
+template<std::size_t Len>
+size_t tbb_hasher(const std::array<uint8_t, Len>& arr)
+{
+	return std::hash<std::string_view>()({ (const char*)arr.data(), Len });
+}
+}
+
+#include <tbb/concurrent_unordered_map.h>
 
 namespace fx
 {
@@ -33,7 +49,7 @@ namespace fx
 
 		std::shared_ptr<ConVar<int>> m_tcpLimitVar;
 
-		tbb::concurrent_unordered_map<std::string, std::atomic<int>> m_tcpLimitByHost;
+		tbb::concurrent_unordered_map<std::array<uint8_t, 16>, std::atomic<int>> m_tcpLimitByHost;
 
 		int m_tcpLimit = 16;
 
@@ -47,6 +63,8 @@ namespace fx
 		void AddEndpoint(const std::string& endPoint);
 
 		virtual void AddExternalServer(const fwRefContainer<net::TcpServer>& server);
+
+		void BlockPeer(const net::PeerAddress& peer);
 
 		inline fwRefContainer<net::TcpServerManager> GetTcpStack()
 		{

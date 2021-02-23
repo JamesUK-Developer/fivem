@@ -248,7 +248,7 @@ static void* PoolAllocateWrap(atPoolBase* pool, uint64_t unk)
 		AddCrashometry("pool_error", "%s (%d)", poolName, pool->GetSize());
 
 		std::string extraWarning = (poolName.find("0x") == std::string::npos)
-			? fmt::sprintf(" (you need to raise %s PoolSize in common/data/gameconfig_pc.xml)", poolName)
+			? fmt::sprintf(" (you need to raise %s PoolSize in common/data/gameconfig.xml)", poolName)
 			: "";
 
 		FatalErrorNoExcept("%s Pool Full, Size == %d%s", poolName, pool->GetSize(), extraWarning);
@@ -259,7 +259,7 @@ static void* PoolAllocateWrap(atPoolBase* pool, uint64_t unk)
 
 static hook::cdecl_stub<void(atPoolBase*)> poolRelease([]()
 {
-	return hook::get_call(hook::get_pattern("E8 ? ? ? ? BA 88 73 00 00 48 8B CB E8", 13));
+	return hook::get_call(hook::get_pattern("E8 ? ? ? ? BA 88 01 00 00 48 8B CB E8", 13));
 });
 
 namespace rage
@@ -273,11 +273,6 @@ namespace rage
 	{
 		return poolRelease(pool);
 	}
-}
-
-static bool ret0()
-{
-	return false;
 }
 
 static hook::cdecl_stub<void()> _loadStreamingFiles([]()
@@ -342,7 +337,7 @@ static HookFunction hookFunction([]()
 	};
 
 	// find initial pools
-	registerPools(hook::pattern("BA ? ? ? ? 41 B8 ? ? ? 00 E8 ? ? ? ? 8B D8 E8"), 51, 1);
+	registerPools(hook::pattern("BA ? ? ? ? 41 B8 ? ? ? ? E8 ? ? ? ? 8B D8 E8"), 51, 1);
 	registerPools(hook::pattern("BA ? ? ? ? E8 ? ? ? ? 8B D8 E8 ? ? ? ? 48 89 44 24 28 4C 8D 05 ? ? ? ? 44 8B CD"), 41, 1);
 	registerPools(hook::pattern("BA ? ? ? ? E8 ? ? ? ? 8B D8 E8 ? ? ? ? 48 89 44 24 28 4C 8D 05 ? ? ? ? 44 8B CE"), 45, 1);
 
@@ -350,23 +345,6 @@ static HookFunction hookFunction([]()
 	MH_CreateHook(hook::get_pattern("4C 63 41 1C 4C 8B D1 49 3B D0 76", -4), PoolAllocateWrap, (void**)&g_origPoolAllocate);
 	MH_CreateHook(hook::get_pattern("8B 41 28 A9 00 00 00 C0 74", -15), PoolDtorWrap, (void**)&g_origPoolDtor);
 	MH_EnableHook(MH_ALL_HOOKS);
-
-	// mapdatastore/maptypesstore 'should async place'
-
-	// typesstore
-	{
-		auto vtbl = hook::get_address<void**>(hook::get_pattern("C7 40 D8 00 01 00 00 45 8D 41 49 E8", 19));
-		hook::put(&vtbl[34], ret0);
-	}
-
-	// datastore
-	{
-		auto vtbl = hook::get_address<void**>(hook::get_pattern("C7 40 D8 C7 01 00 00 44 8D 47 49 E8", 19));
-		hook::put(&vtbl[34], ret0);
-	}
-
-	// raw #map/#typ loading
-	hook::nop(hook::get_pattern("D1 E8 A8 01 74 7D 48 8B 84", 4), 2);
 
 	// raw sfe reg from non-startup
 	MH_Initialize();

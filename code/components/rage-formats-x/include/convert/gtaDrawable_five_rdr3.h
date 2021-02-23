@@ -15,6 +15,7 @@ enum
 	D3DFMT_ATI2 = MAKEFOURCC('A', 'T', 'I', '2'),
 };
 
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -50,23 +51,6 @@ enum class FVFType
 	UByte4,
 	Color,
 	Dec3N
-};
-
-struct meh : public rdr3::pgStreamableBase
-{
-	char stuff[64];
-
-	meh()
-	{
-		static unsigned char hexData[64] = {
-			0x80, 0x00, 0x91, 0x40, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-		};
-
-		memcpy(stuff, hexData, 64);
-	}
 };
 
 inline std::optional<rdr3::sgaInputSemantic> mapVertexSemantic(int semantic)
@@ -217,13 +201,30 @@ rdr3::sgaInputLayout* convert(five::grcVertexFormat* in)
 	return out;
 }
 
+inline uint32_t D3DX_FLOAT_to_UINT(float _V, float _Scale)
+{
+	return (uint32_t)floor(_V * _Scale + 0.5f);
+}
+
+inline float D3DX_Saturate_FLOAT(float _V)
+{
+	return std::min(std::max(_V, 0.f), 1.f);
+}
+
+inline uint32_t D3DX_FLOAT4_to_R10G10B10A2_UNORM(float unpackedInput[4])
+{
+	uint32_t packedOutput;
+	packedOutput = ((D3DX_FLOAT_to_UINT(D3DX_Saturate_FLOAT(unpackedInput[0]), 1023)) | (D3DX_FLOAT_to_UINT(D3DX_Saturate_FLOAT(unpackedInput[1]), 1023) << 10) | (D3DX_FLOAT_to_UINT(D3DX_Saturate_FLOAT(unpackedInput[2]), 1023) << 20) | (D3DX_FLOAT_to_UINT(D3DX_Saturate_FLOAT(unpackedInput[3]), 3) << 30));
+	return packedOutput;
+}
+
 template<>
 rdr3::grcVertexBufferD3D* convert(five::grcVertexBufferD3D* buffer)
 {
 	auto out = new (false) rdr3::grcVertexBufferD3D;
 	memset(out, 0, sizeof(*out));
 
-	out->m_unkBuffer = new (false) meh;
+	out->m_srv = new (false) rdr3::sgaShaderResourceView;
 	out->m_bindFlags = 0x209000;
 
 	auto ob = (char*)buffer->GetVertices();
@@ -345,37 +346,16 @@ rdr3::grcVertexBufferD3D* convert(five::grcVertexBufferD3D* buffer)
 					// normals are abnormal now (for R10G10B10A2 format)
 					if (*sm == rdr3::NORMAL || *sm == rdr3::TANGENT)
 					{
-						struct dec3
-						{
-							uint32_t r : 10;
-							uint32_t g : 10;
-							uint32_t b : 10;
-							uint32_t a : 2;
-						};
-
 						auto n = (float*)inStart;
-						auto o = (dec3*)outStart;
+						auto o = (uint32_t*)outStart;
 
-						int a = 0;
+						float ni[4];
+						ni[0] = (n[0] + 1.0f) / 2.0f;
+						ni[1] = (n[1] + 1.0f) / 2.0f;
+						ni[2] = (n[2] + 1.0f) / 2.0f;
+						ni[3] = (n[3] + 1.0f) / 2.0f;
 
-						if (*sm == rdr3::TANGENT)
-						{
-							float w = n[3];
-
-							if (w < -0.5f)
-							{
-								a = 0;
-							}
-							else if (w > 0.5f)
-							{
-								a = 3;
-							}
-						}
-
-						o->r = (((n[0] + 1.0f) / 2.0f) * 1023.f) + 0.5f;
-						o->g = (((n[1] + 1.0f) / 2.0f) * 1023.f) + 0.5f;
-						o->b = (((n[2] + 1.0f) / 2.0f) * 1023.f) + 0.5f;
-						o->a = a;
+						*o = D3DX_FLOAT4_to_R10G10B10A2_UNORM(ni);
 					}
 					else
 					/*if (*sm == rdr3::NORMAL || *sm == rdr3::TANGENT)
@@ -424,7 +404,7 @@ template<>
 rdr3::grcIndexBufferD3D* convert(five::grcIndexBufferD3D* buffer)
 {
 	auto out = new (false) rdr3::grcIndexBufferD3D(buffer->GetIndexCount(), buffer->GetIndexData());
-	out->m_unkBuffer = new (false) meh;
+	out->m_srv = new (false) rdr3::sgaShaderResourceView;
 
 	return out;
 }
@@ -570,6 +550,7 @@ template<>
 rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 {
 	auto out = new (false) rdr3::grmShaderGroup;
+	static_assert(sizeof(*out) > 48, "rdr3 shader group size is off");
 
 	auto texDict = shaderGroup->GetTextures();
 
@@ -583,7 +564,8 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 
 	for (sh = 0; sh < shaderGroup->GetNumShaders(); sh++)
 	{
-		auto shs = shaderGroup->GetShader(sh)->GetShaderHash();
+		auto osh = shaderGroup->GetShader(sh);
+		auto shs = osh->GetShaderHash();
 
 		if (shs == HashString("vehicle_track2") || shs == HashString("vehicle_track2_emissive"))
 		{
@@ -593,16 +575,22 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 		{
 			shs = HashString("default");
 		}
+		else if (shs == HashString("emissive_clip") || shs == HashString("emissivenight"))
+		{
+			shs = HashString("emissive");
+		}
 
 		rdr3::grmShaderFx* shader = new (false) rdr3::grmShaderFx;
 		memset(shader, 0, sizeof(*shader));
 		//shader->m_shaderHash = HashString("default");
 		shader->m_shaderHash = shs;
 		shader->m_shaderHashPad = 'meta';
-		shader->m_drawBucketMask = 0xFF01;
+		shader->m_drawBucket = osh->m_drawBucket;
+		shader->m_drawBucketMask = osh->m_drawBucketMask & 0xFFFF;
 
 		// we don't even have to follow the full shader logic: the game will copy defaults *at runtime* where needed
 		std::vector<std::tuple<uint32_t, void*>> textureRefs;
+		std::vector<std::tuple<uint32_t, std::array<uint8_t, 16>>> paramRefs;
 
 		auto oldShader = shaderGroup->GetShader(sh);
 		auto params = oldShader->GetParameters();
@@ -618,15 +606,15 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 				// map sampler -> texture (for now)
 				if (pn == HashString("DiffuseSampler") || pn == HashString("TextureSampler_layer0"))
 				{
-					pn = HashString("diffuseTex");
+					pn = HashString("DiffuseTex"); // name2(!)
 				}
 				else if (pn == HashString("BumpSampler") || pn == HashString("BumpSampler_layer0"))
 				{
-					pn = HashString("bumpTexture");
+					pn = HashString("BumpTex");
 				}
 				else if (pn == HashString("SpecSampler") || pn == HashString("SpecSampler_layer0"))
 				{
-					pn = HashString("specTexture");
+					pn = HashString("SpecularTex");
 				}
 				else if (pn == HashString("DiffuseSampler2"))
 				{
@@ -636,13 +624,9 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 				{
 					pn = HashString("DetailTexture");
 				}
-				else if (pn == HashString("DirtSampler"))
-				{
-					pn = HashString("dirtTexture");
-				}
 				else if (pn == HashString("tintPaletteSampler"))
 				{
-					pn = HashString("tintPaletteTex");
+					pn = HashString("TintPaletteTex");
 				}
 
 				auto texture = (five::grcTextureRef*)params[i].GetValue();
@@ -675,26 +659,82 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 					textureRefs.push_back({ pn, tr4 });
 				}
 			}
+			else
+			{
+				auto pn = parameterNames[i];
+
+				// more mapping of name1->name2
+				if (pn == HashString("specularFresnel"))
+				{
+					pn = HashString("Fresnel");
+				}
+				else if (pn == HashString("specularFalloffMult"))
+				{
+					pn = HashString("Specular");
+				}
+				else if (pn == HashString("specularIntensityMult"))
+				{
+					pn = HashString("SpecularColor");
+				}
+				else if (pn == HashString("specularFresnelSelector"))
+				{
+					pn = HashString("FresnelSelector");
+				}
+
+				std::array<uint8_t, 16> value;
+				memcpy(value.data(), params[i].GetValue(), 16);
+
+				if (pn == HashString("Specular"))
+				{
+					*(float*)(value.data()) /= 20.f;
+				}
+
+				paramRefs.emplace_back(pn, value);
+			}
 		}
 
-		auto pd = (rdr3::sgaShaderParamData*)rdr3::pgStreamManager::Allocate(sizeof(rdr3::sgaShaderParamData) + (sizeof(uint64_t) * textureRefs.size()), false, nullptr);
+		auto pd = (rdr3::sgaShaderParamData*)rdr3::pgStreamManager::Allocate(sizeof(rdr3::sgaShaderParamData) + (sizeof(uint64_t) * textureRefs.size()) + (sizeof(uint64_t) * paramRefs.size()), false, nullptr);
 		shader->m_parameterData = pd;
 
-		shader->m_parameterData->numCBuffers = 0;
-		shader->m_parameterData->numParams = textureRefs.size();
+		shader->m_parameterData->numCBuffers = 1;
+		shader->m_parameterData->numParams = textureRefs.size() + paramRefs.size();
 		shader->m_parameterData->numSamplers = 0;
 		shader->m_parameterData->numUnk1 = 0;
 		shader->m_parameterData->numTextures = textureRefs.size();
 
 		auto firstArg = (char*)pd + sizeof(*pd);
+		auto args = pd->params;
 
-		for (int i = 0; i < textureRefs.size(); i++)
 		{
-			*(uint32_t*)(&firstArg[(i * 8) + 0]) = std::get<0>(textureRefs[i]);
-			*(uint32_t*)(&firstArg[(i * 8) + 4]) = 0; // the game should guess this from hash as we don't match
+			int idx = 0;
+
+			for (int i = 0; i < textureRefs.size(); i++, idx++)
+			{
+				*(uint32_t*)(&firstArg[(idx * 8) + 0]) = std::get<0>(textureRefs[i]);
+				*(uint32_t*)(&firstArg[(idx * 8) + 4]) = 0; // the game should guess this from hash as we don't match
+			}
+
+			for (int i = 0; i < paramRefs.size(); i++, idx++)
+			{
+				args[idx].hash = std::get<0>(paramRefs[i]);
+				args[idx].parameter.resourceClass = 3;
+				args[idx].parameter.cbufferIndex = 0;
+				args[idx].parameter.length = 16;
+				args[idx].parameter.offset = i * 16;
+			}
 		}
 
-		auto trs = (rdr3::grmShaderParameter*)rdr3::pgStreamManager::Allocate(sizeof(rdr3::grmShaderParameter) * textureRefs.size(), false, nullptr);
+		size_t paramPtrSize = sizeof(uintptr_t) * 4 * shader->m_parameterData->numCBuffers;
+		size_t paramDataSize = 4 * (16 * paramRefs.size());
+		size_t texRefDataSize = (8 * textureRefs.size());
+		size_t finalParamSize = (paramPtrSize + paramDataSize + texRefDataSize + shader->m_parameterData->numSamplers);
+
+		// we are allocating (final size * 2) so we can account for the game wanting to stuff its corrections in here
+		shader->m_parameterDataSize = finalParamSize * 2;
+
+		auto paramBuffer = (char*)rdr3::pgStreamManager::Allocate(finalParamSize * 2, false, nullptr);
+		auto prs = (rdr3::grmShaderParameter*)(paramBuffer);
+		auto trs = (rdr3::grmShaderParameter*)(paramBuffer + paramPtrSize + paramDataSize); //rdr3::pgStreamManager::Allocate(sizeof(rdr3::grmShaderParameter) * textureRefs.size(), false, nullptr);
 
 		for (int i = 0; i < textureRefs.size(); i++)
 		{
@@ -702,6 +742,23 @@ rdr3::grmShaderGroup* convert(five::grmShaderGroup* shaderGroup)
 		}
 
 		shader->m_textureRefs = trs;
+
+		{
+			auto arg = paramBuffer + paramPtrSize;
+
+			for (int i = 0; i < 4; i++)
+			{
+				prs[i].SetValue(arg);
+
+				for (auto& [hash, value] : paramRefs)
+				{
+					memcpy(arg, value.data(), value.size());
+					arg += value.size();
+				}
+			}
+		}
+
+		shader->m_parameters = prs;
 
 		newShaders[sh] = shader;
 	}
@@ -734,7 +791,7 @@ inline void ConvertBaseDrawable(five::rmcDrawable* drawable, rdr3::gtaDrawable* 
 			auto newModel = convert<rdr3::grmModel*>(oldModel);
 
 			lodGroup.SetModel(i, newModel);
-			lodGroup.SetDrawBucketMask(i, 0xff01); // TODO: change this
+			lodGroup.SetDrawBucketMask(i, oldLodGroup.GetDrawBucketMask(i));
 
 			{
 				auto oldBounds = oldModel->GetGeometryBounds();

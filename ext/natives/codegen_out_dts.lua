@@ -159,6 +159,7 @@ local function printArgument(argument, native)
 		if argument.type.nativeType == 'int' or argument.type.nativeType == 'float' then
 			if isSinglePointerNative(native) then
 				argType = 'number'
+				retType = 'pointer'
 			else
 				retType = 'number'
 			end
@@ -194,6 +195,7 @@ end
 local function formatDefinition(native)
 	local argsDefs = {}
 	local retTypes = {}
+	local pointerArgs = {}
 
 	if native.returns then
 		table.insert(retTypes, printReturnType(native.returns))
@@ -205,6 +207,13 @@ local function formatDefinition(native)
 
 			if argType ~= nil then
 				table.insert(argsDefs, argumentName .. ': ' .. argType)
+			end
+
+			if argType ~= nil and retType == 'pointer' then
+				pointerArgs[#argsDefs] = {
+					name = argumentName,
+					type = argType
+				}
 			elseif retType ~= nil then
 				table.insert(retTypes, retType)
 			end
@@ -212,6 +221,16 @@ local function formatDefinition(native)
 	end
 
 	local retType
+
+	for index, pointer in pairs(pointerArgs) do
+		if (#retTypes > 0 and #argsDefs == 0) or #argsDefs > 1 then
+			argsDefs[index] = pointer.name .. '?: ' .. pointer.type
+		end
+
+		if not (#retTypes == 0 and #argsDefs == 1) then
+			table.insert(retTypes, pointer.type)
+		end
+	end
 
 	if #retTypes > 1 then
 		retType = '[' .. table.concat(retTypes, ', ') .. ']'

@@ -155,6 +155,11 @@ namespace fx
 			return m_identifiers;
 		}
 
+		inline const std::vector<std::string>& GetTokens()
+		{
+			return m_tokens;
+		}
+
 		inline bool HasRouted()
 		{
 			return m_hasRouted;
@@ -170,6 +175,11 @@ namespace fx
 			m_identifiers.emplace_back(identifier);
 
 			UpdateCachedPrincipalValues();
+		}
+
+		inline void AddToken(const std::string& token)
+		{
+			m_tokens.emplace_back(token);
 		}
 
 		inline auto EnterPrincipalScope()
@@ -217,6 +227,16 @@ namespace fx
 			}
 		}
 
+		inline bool IsDropping() const
+		{
+			return m_dropping;
+		}
+
+		inline void SetDropping()
+		{
+			m_dropping = true;
+		}
+
 		const std::any& GetData(const std::string& key);
 
 		void SetData(const std::string& key, const std::any& data);
@@ -261,6 +281,9 @@ namespace fx
 		// the client's identifiers
 		std::vector<std::string> m_identifiers;
 
+		// the client's tokens
+		std::vector<std::string> m_tokens;
+
 		// the client's netid
 		uint32_t m_netId;
 
@@ -293,6 +316,9 @@ namespace fx
 
 		// principal values
 		std::list<se::Principal> m_principals;
+
+		// whether the client is currently being dropped
+		volatile bool m_dropping;
 	};
 
 	inline object_pool<Client, 512 * 1024> clientPool;

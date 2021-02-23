@@ -62,12 +62,11 @@ public:
 
 		if (m_doInityThings)
 		{
-			NativeInvoke::Invoke<LOAD_SCENE, int>(-426.858f, -957.54f, 3.621f);
-
 			NativeInvoke::Invoke<SHUTDOWN_LOADING_SCREEN, int>();
 			NativeInvoke::Invoke<DO_SCREEN_FADE_IN, int>(0);
 
-			NativeInvoke::Invoke<SET_ENTITY_COORDS, int>(playerPedId, -426.858f, -957.54f, 3.621f);
+			NativeInvoke::Invoke<SET_ENTITY_COORDS, int>(playerPedId, 293.089f, 180.466f, 104.301f);
+			NativeInvoke::Invoke<0x428CA6DBD1094446, int>(NativeInvoke::Invoke<0xD80958FC74E988A6, int>(), false);
 
 			if (Instance<ICoreGameInit>::Get()->HasVariable("editorMode"))
 			{
@@ -180,7 +179,7 @@ static bool DoesLevelHashMatch(void* evaluator, uint32_t* hash)
 
 static HookFunction hookFunction([] ()
 {
-	char* levelCaller = Is2060() ? hook::pattern("33 D0 81 E2 FF 00 FF 00 33 D1 48").count(1).get(0).get<char>(0x33) : hook::pattern("0F 94 C2 C1 C1 10 33 CB 03 D3 89 0D").count(1).get(0).get<char>(46);
+	char* levelCaller = xbr::IsGameBuildOrGreater<2060>() ? hook::pattern("33 D0 81 E2 FF 00 FF 00 33 D1 48").count(1).get(0).get<char>(0x33) : hook::pattern("0F 94 C2 C1 C1 10 33 CB 03 D3 89 0D").count(1).get(0).get<char>(46);
 	char* levelByIndex = hook::get_call(levelCaller);
 
 	hook::set_call(&g_origLoadLevelByIndex, levelCaller);
@@ -291,7 +290,7 @@ public:
 				std::string pr = pathRef.substr(1);
 				//network::uri::decode(pr.begin(), pr.end(), std::back_inserter(path));
 
-				resource = m_manager->CreateResource(fragRef);
+				resource = m_manager->CreateResource(fragRef, this);
 				resource->LoadFrom(pr);
 			}
 		}

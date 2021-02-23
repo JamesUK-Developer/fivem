@@ -13,6 +13,8 @@
 #include <Local.h>
 #include <Hooking.h>
 #include <GameInit.h>
+#include <nutsnbolts.h>
+#include <gameSkeleton.h>
 
 #include <limits>
 #include <bitset>
@@ -30,7 +32,24 @@
 
 using namespace winrt::Windows::Gaming::Input;
 
+struct PatternPair
+{
+	std::string_view pattern;
+	int offset;
+};
+
+struct FlyThroughWindscreenParam
+{
+	float* currentPtr;
+	float* defaultPtr;
+};
+
 static std::unordered_set<fwEntity*> g_skipRepairVehicles{};
+
+static std::vector<FlyThroughWindscreenParam> g_flyThroughWindscreenParams{};
+
+static bool* g_flyThroughWindscreenDisabled;
+static bool isFlyThroughWindscreenEnabledConVar = false;
 
 template<typename T>
 inline static T readValue(fwEntity* ptr, int offset)
@@ -173,10 +192,10 @@ static int CurrentRPMOffset;
 static int StreamRenderWheelWidthOffset;
 static int StreamRenderWheelSizeOffset;
 static int DrawnWheelAngleMultOffset;
-
-// TODO: Not valid, figure out.
-static int ClutchOffset = 0x8C0;
-static int TurboBoostOffset = 0x8D8;
+static int TurboBoostOffset; // = 0x8D8;
+static int ClutchOffset; // = 0x8C0;
+//static int VisualHeightGetOffset = 0x080; // There is a vanilla native for this.
+static int VisualHeightSetOffset = 0x07C;
 
 // TODO: Wheel class.
 static int WheelYRotOffset = 0x008;
@@ -185,11 +204,15 @@ static int WheelXOffsetOffset = 0x030;
 static int WheelTyreRadiusOffset = 0x110;
 static int WheelRimRadiusOffset = 0x114;
 static int WheelTyreWidthOffset = 0x118;
-static int WheelRotationSpeedOffset = 0x170;
-static int WheelTractionVectorLengthOffset = 0x1B8;
-static int WheelSteeringAngleOffset = 0x1CC;
-static int WheelBrakePressureOffset = 0x1D0;
-static int WheelHealthOffset = 0x1E8; // 75 24 F3 0F 10 81 ? ? ? ? F3 0F
+static int WheelSuspensionCompressionOffset;
+static int WheelRotationSpeedOffset; // = 0x170;
+static int WheelTractionVectorLengthOffset; // = 0x1B8;
+static int WheelSteeringAngleOffset; // = 0x1CC;
+static int WheelBrakePressureOffset; // = 0x1D0;
+static int WheelPowerOffset;
+static int WheelHealthOffset; // = 0x1E8; // 75 24 F3 0F 10 81 ? ? ? ? F3 0F
+static int WheelSurfaceMaterialOffset;
+static int WheelFlagsOffset;
 
 static char* VehicleTopSpeedModifierPtr;
 static int VehicleCheatPowerIncreaseOffset;
@@ -198,6 +221,8 @@ static std::unordered_set<fwEntity*> g_deletionTraces;
 static std::unordered_set<void*> g_deletionTraces2;
 
 static void(*g_origDeleteVehicle)(void* vehicle);
+
+static void SetCanPedStandOnVehicle(fwEntity* vehicle, int flag);
 
 static void DeleteVehicleWrap(fwEntity* vehicle)
 {
@@ -224,13 +249,16 @@ static void DeleteVehicleWrap(fwEntity* vehicle)
 	}
 
 	// save handling data pointer
-	void* handling = readValue<void*>(vehicle, HandlingDataPtrOffset);
+	CHandlingData* handling = readValue<CHandlingData*>(vehicle, HandlingDataPtrOffset);
 
 	// call original destructor
 	g_origDeleteVehicle(vehicle);
 
 	// run cleanup after destructor
 	g_skipRepairVehicles.erase(vehicle);
+
+	// remove flag
+	SetCanPedStandOnVehicle(vehicle, 0);
 
 	// Delete the handling if it has been set to hooked.
 	if (*((char*)handling + 28) == 1)
@@ -269,6 +297,53 @@ static void DeleteNetworkCloneWrap(void* objectMgr, void* netObject, int reason,
 	return g_origDeleteNetworkClone(objectMgr, netObject, reason, forceRemote1, forceRemote2);
 }
 
+static void ResetFlyThroughWindscreenParams()
+{
+	for (auto& entry : g_flyThroughWindscreenParams)
+	{
+		*entry.currentPtr = *entry.defaultPtr;
+	}
+}
+
+static bool (*g_origCanPedStandOnVehicle)(CVehicle*);
+static bool g_overrideCanPedStandOnVehicle;
+static std::unordered_map<fwEntity*, int> g_canPedStandOnVehicles;
+
+static void SetCanPedStandOnVehicle(fwEntity* vehicle, int flag)
+{
+	if (flag == 0)
+	{
+		g_canPedStandOnVehicles.erase(vehicle);
+		return;
+	}
+
+	g_canPedStandOnVehicles[vehicle] = flag;
+}
+
+static bool CanPedStandOnVehicleWrap(CVehicle* vehicle)
+{
+	if (g_overrideCanPedStandOnVehicle)
+	{
+		return true;
+	}
+
+	if (auto it = g_canPedStandOnVehicles.find(vehicle); it != g_canPedStandOnVehicles.end())
+	{
+		auto can = it->second;
+
+		if (can == -1)
+		{
+			return false;
+		}
+		else if (can == 1)
+		{
+			return true;
+		}
+	}
+
+	return g_origCanPedStandOnVehicle(vehicle);
+}
+
 static HookFunction initFunction([]()
 {
 	{
@@ -286,6 +361,8 @@ static HookFunction initFunction([]()
 		DrawnWheelAngleMultOffset = *hook::get_pattern<uint32_t>("48 8B C8 E8 ? ? ? ? 84 C0 74 ? F3 0F 10 83", 33);
 		VehicleTopSpeedModifierPtr = hook::get_pattern<char>("48 8B D9 48 81 C1 ? ? ? ? 48 89 5C 24 28 44 0F 29 40 C8");
 		VehicleCheatPowerIncreaseOffset = *hook::get_pattern<uint32_t>("E8 ? ? ? ? 8B 83 ? ? ? ? C7 83", 23);
+		WheelSurfaceMaterialOffset = *hook::get_pattern<uint32_t>("48 8B 4A 10 0F 28 CF F3 0F 59 05", -4);
+		WheelHealthOffset = *hook::get_pattern<uint32_t>("75 24 F3 0F 10 ? ? ? 00 00 F3 0F", 6);
 	}
 
 	{
@@ -293,6 +370,12 @@ static HookFunction initFunction([]()
 
 		FuelLevelOffset = *(uint32_t*)(location + 49);
 		OilLevelOffset = *(uint32_t*)(location + 61);
+	}
+
+	{
+		auto location = hook::get_pattern<char>("F3 0F 10 9F ? ? ? ? 0F 2F DF 73 0A");
+
+		TurboBoostOffset = *(uint32_t*)(location + 4);
 	}
 
 	{
@@ -342,7 +425,35 @@ static HookFunction initFunction([]()
 		auto location = hook::get_pattern<char>("F6 83 ? ? ? ? 07 75 ? 44 0F");
 
 		CurrentRPMOffset = *(uint32_t*)(location - 42);
+		ClutchOffset = CurrentRPMOffset + 12;
 		ThrottleOffsetOffset = CurrentRPMOffset + 16;
+	}
+
+	{
+		auto location = hook::get_pattern<char>("45 0F 57 ? F3 0F 11 ? ? ? 00 00 F3 0F 5C");
+
+		WheelSuspensionCompressionOffset = *(uint32_t*)(location + 8);
+		WheelRotationSpeedOffset = *(uint32_t*)(location + 8) + 0xC;
+	}
+
+	{
+		char* location;
+		if (xbr::IsGameBuildOrGreater<2060>()) {
+			location = hook::get_pattern<char>("0F 2F ? ? ? 00 00 0F 97 C0 EB ? D1");
+		}
+		else {
+			location = hook::get_pattern<char>("0F 2F ? ? ? 00 00 0F 97 C0 EB DA");
+		}
+		WheelSteeringAngleOffset = (*(uint32_t*)(location + 3));
+		WheelBrakePressureOffset = (*(uint32_t*)(location + 3)) + 0x4;
+		WheelPowerOffset = (*(uint32_t*)(location + 3)) + 0x8;
+		WheelTractionVectorLengthOffset = (*(uint32_t*)(location + 3)) - 0x14;
+	}
+
+	{
+		auto location = hook::get_pattern<char>("75 11 48 8B 01 8B 88");
+
+		WheelFlagsOffset = *(uint32_t*)(location + 7);
 	}
 
 	{
@@ -353,10 +464,48 @@ static HookFunction initFunction([]()
 	}
 
 	{
-		auto location = hook::get_pattern<char>("44 0F 2F 43 ? 45 8D 74 24 01");
+		auto location = hook::get_pattern<char>("44 0F 2F 43 48 45 8D");
 
 		DrawHandlerPtrOffset = *(uint8_t*)(location + 4);
 		HandlingDataPtrOffset = *(uint32_t*)(location - 35);
+	}
+
+	{
+		// replace netgame check for fly through windscreen with our variable
+		g_flyThroughWindscreenDisabled = (bool*)hook::AllocateStubMemory(1);
+		static ConVar<bool> enableFlyThroughWindscreen("game_enableFlyThroughWindscreen", ConVar_Replicated, false, &isFlyThroughWindscreenEnabledConVar);
+
+		auto location = hook::get_pattern<uint32_t>("45 33 ED 44 38 2D ? ? ? ? 4D", 6);
+		*location = (intptr_t)g_flyThroughWindscreenDisabled - (intptr_t)location - 4;
+	}
+
+	{
+		std::initializer_list<PatternPair> list = {
+			{ "44 38 ? ? ? ? 02 74 ? F3 0F 10 1D", 13 },
+			{ "44 38 ? ? ? ? 02 74 ? F3 0F 10 3D", 13 },
+			{ "48 8B 10 FF 52 ? 0F 28 D8 F3 0F 59", -23 },
+			{ "F3 0F 10 0D ? ? ? ? 0F 2F 8B ? ? ? ? 0F", 4 }
+		};
+
+		auto index = 0;
+		auto stub = (uint64_t)hook::AllocateStubMemory(sizeof(float) * list.size());
+
+		for (auto& entry : list)
+		{
+			auto location = hook::pattern(entry.pattern).count(1).get(0).get<int32_t>(entry.offset);
+
+			auto defaultAddr = hook::get_address<float*>(location);
+			auto currentAddr = (float*)(stub + (sizeof(float) * index));
+
+			FlyThroughWindscreenParam data;
+			data.defaultPtr = defaultAddr;
+			data.currentPtr = currentAddr;
+
+			*location = (intptr_t)currentAddr - (intptr_t)location - 4;
+			++index;
+
+			g_flyThroughWindscreenParams.push_back(data);
+		}
 	}
 
 	// not a vehicle native
@@ -424,6 +573,20 @@ static HookFunction initFunction([]()
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_ENGINE_TEMPERATURE", std::bind(readVehicleMemory<float, &EngineTempOffset>, _1, "GET_VEHICLE_ENGINE_TEMPERATURE"));
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_ENGINE_TEMPERATURE", std::bind(writeVehicleMemory<float, &EngineTempOffset>, _1, "SET_VEHICLE_ENGINE_TEMPERATURE"));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_SUSPENSION_HEIGHT", [](fx::ScriptContext& context)
+	{
+		if (context.GetArgumentCount() < 2)
+		{
+			return;
+		}
+
+		if (fwEntity* vehicle = getAndCheckVehicle(context, "SET_VEHICLE_SUSPENSION_HEIGHT"))
+		{
+			auto wheelsAddress = readValue<uint64_t>(vehicle, WheelsPtrOffset);
+			auto addr = *reinterpret_cast<float*>(wheelsAddress + VisualHeightSetOffset) = context.GetArgument<float>(1);
+		}
+	});
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_NUMBER_OF_WHEELS", std::bind(readVehicleMemory<unsigned char, &NumWheelsOffset>, _1, "GET_VEHICLE_NUMBER_OF_WHEELS"));
 
@@ -497,6 +660,68 @@ static HookFunction initFunction([]()
 		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelBrakePressureOffset));
 	}));
 
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_BRAKE_PRESSURE", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		*reinterpret_cast<float*>(wheelAddr + WheelBrakePressureOffset) = context.GetArgument<float>(2);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_POWER", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelPowerOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_POWER", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		*reinterpret_cast<float*>(wheelAddr + WheelPowerOffset) = context.GetArgument<float>(2);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_TRACTION_VECTOR_LENGTH", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelTractionVectorLengthOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_TRACTION_VECTOR_LENGTH", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		*reinterpret_cast<float*>(wheelAddr + WheelTractionVectorLengthOffset) = context.GetArgument<float>(2);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_ROTATION_SPEED", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelRotationSpeedOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_ROTATION_SPEED", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		*reinterpret_cast<float*>(wheelAddr + WheelRotationSpeedOffset) = context.GetArgument<float>(2);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_SUSPENSION_COMPRESSION", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelSuspensionCompressionOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_FLAGS", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<uint16_t>(*reinterpret_cast<uint16_t*>(wheelAddr + WheelFlagsOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_FLAGS", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		*reinterpret_cast<uint16_t*>(wheelAddr + WheelFlagsOffset) = context.GetArgument<uint16_t>(2);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_IS_POWERED", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		auto wheelFlags = *reinterpret_cast<uint16_t*>(wheelAddr + WheelFlagsOffset);
+		context.SetResult<bool>(wheelFlags & 0x10);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_IS_POWERED", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		auto wheelFlags = *reinterpret_cast<uint16_t*>(wheelAddr + WheelFlagsOffset);
+		*reinterpret_cast<uint16_t*>(wheelAddr + WheelFlagsOffset) = context.GetArgument<bool>(2) ? wheelFlags | 0x10 : wheelFlags & ~0x10;
+	}));
+
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_STEERING_ANGLE", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
 	{
 		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelSteeringAngleOffset));
@@ -505,6 +730,11 @@ static HookFunction initFunction([]()
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_HEALTH", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
 	{
 		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelHealthOffset));
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_SURFACE_MATERIAL", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
+	{
+		context.SetResult<unsigned char>(*reinterpret_cast<unsigned char*>(wheelAddr + WheelSurfaceMaterialOffset));
 	}));
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_WHEEL_HEALTH", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
@@ -638,6 +868,7 @@ static HookFunction initFunction([]()
 				}
 			}
 		}
+
 		context.SetResult<bool>(success);
 	});
 
@@ -766,6 +997,30 @@ static HookFunction initFunction([]()
 		context.SetResult<float>(result);
 	});
 
+	fx::ScriptEngine::RegisterNativeHandler("SET_FLY_THROUGH_WINDSCREEN_PARAMS", [](fx::ScriptContext& context)
+	{
+		bool success = false;
+		auto paramsCount = g_flyThroughWindscreenParams.size();
+
+		if (context.GetArgumentCount() == paramsCount)
+		{
+			for (int i = 0; i < paramsCount; i++)
+			{
+				auto entry = g_flyThroughWindscreenParams.at(i);
+				*entry.currentPtr = context.GetArgument<float>(i);
+			}
+
+			success = true;
+		}
+
+		context.SetResult<bool>(success);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("RESET_FLY_THROUGH_WINDSCREEN_PARAMS", [](fx::ScriptContext& context)
+	{
+		ResetFlyThroughWindscreenParams();
+	});
+
 	static struct : jitasm::Frontend
 	{
 		static bool ShouldSkipRepairFunc(fwEntity* VehPointer)
@@ -797,7 +1052,7 @@ static HookFunction initFunction([]()
 			jne("skiprepair");
 			pop(rax);
 			sub(rsp, 0x28);
-			AppendInstr(jitasm::InstrID::I_CALL, 0xFF, 0, jitasm::Imm8(2), qword_ptr[rax + 0x5D0]);
+			AppendInstr(jitasm::InstrID::I_CALL, 0xFF, 0, jitasm::Imm8(2), qword_ptr[rax + (xbr::IsGameBuildOrGreater<2189>() ? 0x5D8 : 0x5D0)]);
 			add(rsp, 0x28);
 			ret();
 			L("skiprepair");
@@ -808,20 +1063,43 @@ static HookFunction initFunction([]()
 
 	if (GetModuleHandle(L"AdvancedHookV.dll") == nullptr)
 	{
-		auto repairFunc = hook::get_pattern("48 8B 03 45 33 C0 B2 01 48 8B CB FF 90 D0 05 00 00 48 8B 4B 20", 11);
-		hook::nop(repairFunc, 6);
-		hook::call_reg<2>(repairFunc, asmfunc.GetCode());
+		{
+			auto repairFunc = hook::get_pattern("F7 D0 48 8B CB 21 83 ? ? ? ? E8 ? ? ? ? 48 8B 03", 27);
+			hook::nop(repairFunc, 6);
+			hook::call_reg<2>(repairFunc, asmfunc.GetCode());
+		}
+
+		{
+			auto repairFunc = hook::get_pattern("FF 90 ? ? ? ? 8A 83 ? ? ? ? 24 07");
+			hook::nop(repairFunc, 6);
+			hook::call_reg<2>(repairFunc, asmfunc.GetCode());
+		}
 	}
 
-	OnKillNetworkDone.Connect([]() {
+	rage::OnInitFunctionEnd.Connect([](rage::InitFunctionType type)
+	{
+		if (type == rage::INIT_CORE)
+		{
+			ResetFlyThroughWindscreenParams();
+		}
+	});
+
+	OnMainGameFrame.Connect([]()
+	{
+		*g_flyThroughWindscreenDisabled = !isFlyThroughWindscreenEnabledConVar;
+	});
+
+	OnKillNetworkDone.Connect([]()
+	{
 		g_skipRepairVehicles.clear();
+		ResetFlyThroughWindscreenParams();
 	});
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_AUTO_REPAIR_DISABLED", [](fx::ScriptContext& context) {
 		auto vehHandle = context.GetArgument<int>(0);
 		auto shouldDisable = context.GetArgument<bool>(1);
 
-		fwEntity *entity = rage::fwScriptGuid::GetBaseFromGuid(vehHandle);
+		fwEntity* entity = rage::fwScriptGuid::GetBaseFromGuid(vehHandle);
 
 		if (shouldDisable)
 		{
@@ -845,9 +1123,38 @@ static HookFunction initFunction([]()
 		}
 	});
 
+	fx::ScriptEngine::RegisterNativeHandler("OVERRIDE_VEHICLE_PEDS_CAN_STAND_ON_TOP_FLAG", [](fx::ScriptContext& context)
+	{
+		auto vehHandle = context.GetArgument<int>(0);
+		fwEntity* entity = rage::fwScriptGuid::GetBaseFromGuid(vehHandle);
+
+		if (entity->IsOfType<CVehicle>())
+		{
+			bool can = context.GetArgument<bool>(1);
+			SetCanPedStandOnVehicle(entity, can ? 1 : -1);
+		}
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("RESET_VEHICLE_PEDS_CAN_STAND_ON_TOP_FLAG", [](fx::ScriptContext& context)
+	{
+		auto vehHandle = context.GetArgument<int>(0);
+		fwEntity* entity = rage::fwScriptGuid::GetBaseFromGuid(vehHandle);
+
+		if (entity->IsOfType<CVehicle>())
+		{
+			SetCanPedStandOnVehicle(entity, 0);
+		}
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("OVERRIDE_PEDS_CAN_STAND_ON_TOP_FLAG", [](fx::ScriptContext& context)
+	{
+		g_overrideCanPedStandOnVehicle = context.GetArgument<bool>(0);
+	});
+
 	MH_Initialize();
 	MH_CreateHook(hook::get_pattern("E8 ? ? ? ? 8A 83 DA 00 00 00 24 0F 3C 02", -0x32), DeleteVehicleWrap, (void**)&g_origDeleteVehicle);
 	MH_CreateHook(hook::get_pattern("80 7A 4B 00 45 8A F9", -0x1D), DeleteNetworkCloneWrap, (void**)&g_origDeleteNetworkClone);
+	MH_CreateHook(hook::get_call(hook::get_pattern("74 22 48 8B CA E8 ? ? ? ? 84 C0 74 16", 5)), CanPedStandOnVehicleWrap, (void**)&g_origCanPedStandOnVehicle);
 	MH_EnableHook(MH_ALL_HOOKS);
 });
 
@@ -890,6 +1197,14 @@ static bool g_useWGI = true;
 
 static DWORD WINAPI XInputGetStateHook(_In_ DWORD dwUserIndex, _Out_ XINPUT_STATE* pState)
 {
+	// if we're running Steam, don't - Steam will crash in numerous scenarios.
+	static auto gameOverlay = GetModuleHandleW(L"gameoverlayrenderer64.dll");
+
+	if (gameOverlay != NULL)
+	{
+		return g_origXInputGetState(dwUserIndex, pState);
+	}
+
 	auto gamepads = Gamepad::Gamepads();
 
 	if (gamepads.Size() == 0 || !g_useWGI)
@@ -990,6 +1305,14 @@ static DWORD(*WINAPI g_origXInputSetState)(_In_ DWORD dwUserIndex, _In_ XINPUT_V
 
 static DWORD WINAPI XInputSetStateHook(_In_ DWORD dwUserIndex, _In_ XINPUT_VIBRATION* pVibration)
 {
+	// if we're running Steam, don't - Steam will crash in numerous scenarios.
+	static auto gameOverlay = GetModuleHandleW(L"gameoverlayrenderer64.dll");
+
+	if (gameOverlay != NULL)
+	{
+		return g_origXInputSetState(dwUserIndex, pVibration);
+	}
+
 	auto gamepads = Gamepad::Gamepads();
 
 	if (gamepads.Size() == 0 || !g_useWGI)
@@ -1024,6 +1347,18 @@ static HookFunction inputFunction([]()
 	if (!VerifyVersionInfoW(&osvi, VER_BUILDNUMBER, viMask))
 	{
 		return;
+	}
+
+	HMODULE hLib = LoadLibraryW(L"Windows.Gaming.Input.dll");
+
+	if (!hLib)
+	{
+		return;
+	}
+
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)hLib, &hLib))
+	{
+		trace("Failed to pin WGI DLL.\n");
 	}
 
 	{

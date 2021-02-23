@@ -8,6 +8,7 @@ import { DiscourseService, DiscourseUser } from '../discourse.service';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { ServersService, HistoryServer, HistoryServerStatus } from 'app/servers/servers.service';
 import { L10N_LOCALE, L10nLocale } from 'angular-l10n';
+import { Server } from 'app/servers/server';
 
 let cachedWelcomeMessage: SafeHtml;
 let cachedServiceMessage: SafeHtml;
@@ -35,12 +36,14 @@ export class HomeComponent implements OnInit, OnDestroy {
 	localhostPort = '';
 	nickname = '';
 
-	playerStats: [number, number];
+	playerStats: [number, number, number];
 
 	gameName = 'gta5';
 
 	lastServer: HistoryServer;
 	HistoryServerStatus = HistoryServerStatus;
+
+	topServer: Server;
 
 	constructor(
 		private tweetService: TweetService,
@@ -53,6 +56,8 @@ export class HomeComponent implements OnInit, OnDestroy {
 	) {
 		discourseService.signinChange.subscribe((user) => {
 			this.currentAccount = user;
+
+			this.loadTopServer();
 		});
 
 		this.serviceMessage = cachedServiceMessage;
@@ -85,9 +90,22 @@ export class HomeComponent implements OnInit, OnDestroy {
 		this.fetchServiceMessage();
 
 		this.loadLastServer();
+		this.loadTopServer();
 	}
 
 	ngOnDestroy() {}
+
+	async loadTopServer() {
+		if (this.currentAccount) {
+			const pinConfig = await this.serversService.loadPinConfig();
+
+			this.topServer = await this.serversService.getServer(pinConfig.noAdServerId);
+		} else {
+			this.topServer = await this.serversService.getTopServer();
+		}
+
+		this.changeDetectorRef.markForCheck();
+	}
 
 	async loadLastServer() {
 		const serverHistory = this.gameService.getServerHistory();
@@ -151,6 +169,9 @@ export class HomeComponent implements OnInit, OnDestroy {
 		window.fetch('https://runtime.fivem.net/counts.json')
 			.then(async (res) => {
 				this.playerStats = (await res.json()).map((c) => (Math.floor(c) / 1000).toFixed(1));
+			})
+			.catch(() => {
+				this.playerStats = [-1, -1, -1];
 			});
 	}
 

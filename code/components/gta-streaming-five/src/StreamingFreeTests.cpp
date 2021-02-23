@@ -6,6 +6,10 @@
  */
 
 #include "StdInc.h"
+
+#include <unordered_set>
+
+#ifdef GTA_FIVE
 #include "Hooking.h"
 #include <atPool.h>
 
@@ -82,12 +86,20 @@ bool rage::fwAssetStoreBase::IsResourceValid(uint32_t idx)
 {
 	return fwAssetStoreBase__isResourceValid(this, idx);
 }
+#endif
 
+#ifdef _DEBUG
 static std::map<std::string, uint32_t, std::less<>> g_streamingNamesToIndices;
 static std::map<uint32_t, std::string> g_streamingIndexesToNames;
 static std::map<uint32_t, std::string> g_streamingHashesToNames;
-extern std::set<std::string> g_streamingSuffixSet;
+#else
+static std::unordered_map<std::string, uint32_t> g_streamingNamesToIndices;
+static std::unordered_map<uint32_t, std::string> g_streamingIndexesToNames;
+static std::unordered_map<uint32_t, std::string> g_streamingHashesToNames;
+#endif
+extern std::unordered_set<std::string> g_streamingSuffixSet;
 
+#ifdef GTA_FIVE
 template<bool IsRequest>
 rage::strStreamingModule** GetStreamingModuleWithValidate(void* streamingModuleMgr, uint32_t index)
 {
@@ -152,6 +164,7 @@ uint32_t* AddStreamingFileWrap(uint32_t* indexRet)
 
 	return indexRet;
 }
+#endif
 
 namespace streaming
 {
@@ -171,6 +184,7 @@ namespace streaming
 	}
 }
 
+#ifdef GTA_FIVE
 void(*g_origAssetRelease)(void*, uint32_t);
 
 struct AssetStore
@@ -235,10 +249,12 @@ static void(*g_origMakeDefragmentable)(rage::pgBase*, const rage::datResourceMap
 
 static void MakeDefragmentableHook(rage::pgBase* self, const rage::datResourceMap& map, bool a3)
 {
-	if (self->pageMap)
+	auto pageMap = self->pageMap;
+
+	if (pageMap)
 	{
 		auto newPageMap = new rage::PageMap;
-		memcpy(newPageMap, self->pageMap, offsetof(rage::PageMap, pageInfo) + (3 * sizeof(void*) * (map.numPages1 + map.numPages2)));
+		memcpy(newPageMap, pageMap, offsetof(rage::PageMap, pageInfo) + (3 * sizeof(void*) * (map.numPages1 + map.numPages2)));
 
 		self->pageMap = newPageMap;
 	}
@@ -308,8 +324,12 @@ static void ArchetypeInitHook(void* at, void* a3, fwArchetypeDef* def, void* a4)
 {
 	g_origArchetypeInit(at, a3, def, a4);
 
-	auto atIdx = *g_archetypeHash->find(def->name);
-	g_archetypeDeletionStack[def->name].push_front(atIdx);
+	auto atIdx = g_archetypeHash->find(def->name);
+
+	if (atIdx)
+	{
+		g_archetypeDeletionStack[def->name].push_front(*atIdx);
+	}
 }
 
 static HookFunction hookFunction([] ()
@@ -435,3 +455,4 @@ static HookFunction hookFunction([] ()
 		g_archetypeLength = (size_t*)hook::get_address<void*>(getArchetypeFn + 0x7D);
 	}
 });
+#endif

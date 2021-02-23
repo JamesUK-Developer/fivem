@@ -255,6 +255,11 @@ typedef struct _ENetChannel
    ENetList     incomingUnreliableCommands;
 } ENetChannel;
 
+typedef enum _ENetPeerFlag
+{
+   ENET_PEER_FLAG_NEEDS_DISPATCH = (1 << 0)
+} ENetPeerFlag;
+
 /**
  * An ENet peer which data packets may be sent or received from. 
  *
@@ -316,7 +321,9 @@ typedef struct _ENetPeer
    ENetList      outgoingReliableCommands;
    ENetList      outgoingUnreliableCommands;
    ENetList      dispatchedCommands;
-   int           needsDispatch;
+   enet_uint16   flags;
+   enet_uint8    roundTripTimeRemainder;
+   enet_uint8    roundTripTimeVarianceRemainder;
    enet_uint16   incomingUnsequencedGroup;
    enet_uint16   outgoingUnsequencedGroup;
    enet_uint32   unsequencedWindow [ENET_PEER_UNSEQUENCED_WINDOW_SIZE / 32]; 
@@ -581,8 +588,8 @@ extern void                  enet_peer_setup_outgoing_command (ENetPeer *, ENetO
 extern ENetOutgoingCommand * enet_peer_queue_outgoing_command (ENetPeer *, const ENetProtocol *, ENetPacket *, enet_uint32, enet_uint16);
 extern ENetIncomingCommand * enet_peer_queue_incoming_command (ENetPeer *, const ENetProtocol *, const void *, size_t, enet_uint32, enet_uint32);
 extern ENetAcknowledgement * enet_peer_queue_acknowledgement (ENetPeer *, const ENetProtocol *, enet_uint16);
-extern void                  enet_peer_dispatch_incoming_unreliable_commands (ENetPeer *, ENetChannel *);
-extern void                  enet_peer_dispatch_incoming_reliable_commands (ENetPeer *, ENetChannel *);
+extern void                  enet_peer_dispatch_incoming_unreliable_commands (ENetPeer *, ENetChannel *, ENetIncomingCommand *);
+extern void                  enet_peer_dispatch_incoming_reliable_commands (ENetPeer *, ENetChannel *, ENetIncomingCommand *);
 extern void                  enet_peer_on_connect (ENetPeer *);
 extern void                  enet_peer_on_disconnect (ENetPeer *);
 

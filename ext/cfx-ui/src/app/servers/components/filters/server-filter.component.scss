@@ -54,7 +54,7 @@
 				@include theme() using ($theme) {
 					color: gtv($theme, fgColor);
 
-					&:hover {
+					&:hover, &:focus {
 						color: gtv($theme, accentContrastColor);
 						background-color: gtv($theme, accentColor1);
 					}
@@ -76,7 +76,7 @@
 
 					padding: var(--q1) var(--q1) var(--q1) 0;
 
-					font-family: 'Montserrat';
+					@include fontMontserrat;
 					letter-spacing: 1px;
 					text-transform: uppercase;
 
@@ -91,7 +91,7 @@
 					z-index: 10;
 				}
 
-				&:hover {
+				&:hover, &:focus {
 					transition: none;
 
 					.label {
@@ -116,6 +116,10 @@
 			};
 		}
 
+		input {
+			user-select: text;
+		}
+
 		input:focus + .search-dropdown {
 			transform: translateY(0);
 			opacity: 1;
@@ -138,7 +142,7 @@
 			pointer-events: none;
 
 			@include theme() using ($theme) {
-				background-color: rgba(gtv($theme, accentColor1), .1);
+				background-color: rgba(gtv($theme, accentColor1), css-max(var(--opacity-clamp), .1));
 				border: solid 2px gtv($theme, accentColor1);
 				border-top: none;
 			}
@@ -216,7 +220,7 @@
 
 				padding: var(--q1) 0 var(--q1) var(--q1);
 
-				font-family: 'Montserrat';
+				@include fontMontserrat;
 				letter-spacing: 1px;
 				text-transform: uppercase;
 
@@ -279,7 +283,7 @@
 				}
 			}
 
-			&:hover {
+			&:hover, &:focus-within {
 				@include theme() using($theme) {
 					.trigger {
 						color: gtv($theme, accentContrastColor);
@@ -337,7 +341,7 @@
 
 				padding: var(--q1) 0 var(--q1) var(--q1);
 
-				font-family: 'Montserrat';
+				@include fontMontserrat;
 				letter-spacing: 1px;
 				text-transform: uppercase;
 
@@ -383,7 +387,7 @@
 					text-transform: uppercase;
 					letter-spacing: 1px;
 
-					&:hover {
+					&:hover, &:focus {
 						@include theme() using ($theme) {
 							background-color: rgba(gtv($theme, accentColor1), .25);
 						}
@@ -398,7 +402,7 @@
 				}
 			}
 
-			&:hover {
+			&:hover, &:focus-within {
 				@include theme() using($theme) {
 					.trigger {
 						color: gtv($theme, accentContrastColor);

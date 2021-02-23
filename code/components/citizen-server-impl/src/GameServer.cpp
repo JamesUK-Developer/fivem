@@ -877,7 +877,7 @@ namespace fx
 		{
 			std::vector<fx::ClientSharedPtr> toRemove;
 
-			bool lockdownMode = m_instance->GetComponent<fx::ServerGameState>()->GetEntityLockdownMode() == fx::EntityLockdownMode::Strict;
+			uint8_t syncStyle = (uint8_t)m_instance->GetComponent<fx::ServerGameState>()->GetSyncStyle();
 
 			m_clientRegistry->ForAllClients([&](const fx::ClientSharedPtr& client)
 			{
@@ -887,17 +887,25 @@ namespace fx
 				{
 					const auto& lm = client->GetData("lockdownMode");
 					const auto& lf = client->GetData("lastFrame");
+					const auto& ss = client->GetData("syncStyle");
 
-					if (!lm.has_value() || std::any_cast<bool>(lm) != lockdownMode || !lf.has_value() || (m_serverTime - std::any_cast<uint64_t>(lf)) > 1000)
+					bool lockdownMode = m_instance->GetComponent<fx::ServerGameState>()->GetEntityLockdownMode(client) == fx::EntityLockdownMode::Strict;
+
+					if (!lm.has_value() || std::any_cast<bool>(lm) != lockdownMode ||
+						!ss.has_value() || std::any_cast<uint8_t>(ss) != syncStyle ||
+						!lf.has_value() ||
+						(m_serverTime - std::any_cast<uint64_t>(lf)) > 1000)
 					{
 						net::Buffer outMsg;
 						outMsg.Write(HashRageString("msgFrame"));
 						outMsg.Write<uint32_t>(0);
 						outMsg.Write<uint8_t>(lockdownMode);
+						outMsg.Write<uint8_t>(syncStyle);
 
 						client->SendPacket(0, outMsg, NetPacketType_Reliable);
 
 						client->SetData("lockdownMode", lockdownMode);
+						client->SetData("syncStyle", syncStyle);
 						client->SetData("lastFrame", m_serverTime);
 					}
 				}
@@ -911,7 +919,7 @@ namespace fx
 
 			for (auto& client : toRemove)
 			{
-				DropClient(client, "Timed out after %d seconds.", std::chrono::duration_cast<std::chrono::seconds>(CLIENT_DEAD_TIMEOUT).count());
+				DropClient(client, "Server->client connection timed out. Last seen %d msec ago.", (msec() - client->GetLastSeen()).count());
 			}
 		}
 
@@ -1010,6 +1018,21 @@ namespace fx
 			realReason = "Dropped.";
 		}
 
+		if (client->IsDropping())
+		{
+			return;
+		}
+
+		client->SetDropping();
+
+		gscomms_execute_callback_on_main_thread([this, client, realReason]()
+		{
+			DropClientInternal(client, realReason);
+		});
+	}
+
+	void GameServer::DropClientInternal(const fx::ClientSharedPtr& client, const std::string& realReason)
+	{
 		// send an out-of-band error to the client
 		if (client->GetPeer())
 		{
@@ -1162,7 +1185,7 @@ namespace fx
 			{
 				auto limiter = server->GetInstance()->GetComponent<fx::PeerAddressRateLimiterStore>()->GetRateLimiter("getinfo", fx::RateLimiterDefaults{ 2.0, 10.0 });
 
-				if (!limiter->Consume(from))
+				if (!fx::IsProxyAddress(from) && !limiter->Consume(from))
 				{
 					return;
 				}
@@ -1202,7 +1225,7 @@ namespace fx
 			{
 				auto limiter = server->GetInstance()->GetComponent<fx::PeerAddressRateLimiterStore>()->GetRateLimiter("getstatus", fx::RateLimiterDefaults{ 1.0, 5.0 });
 
-				if (!limiter->Consume(from))
+				if (!fx::IsProxyAddress(from) && !limiter->Consume(from))
 				{
 					return;
 				}
@@ -1256,7 +1279,7 @@ namespace fx
 			{
 				auto limiter = server->GetInstance()->GetComponent<fx::PeerAddressRateLimiterStore>()->GetRateLimiter("rcon", fx::RateLimiterDefaults{ 0.2, 5.0 });
 
-				if (!limiter->Consume(from))
+				if (!fx::IsProxyAddress(from) && !limiter->Consume(from))
 				{
 					return;
 				}
@@ -1538,7 +1561,7 @@ DECLARE_INSTANCE_TYPE(fx::ServerDecorators::HostVoteCount);
 #include <decorators/WithProcessTick.h>
 #include <decorators/WithPacketHandler.h>
 
-void gscomms_execute_callback_on_main_thread(const std::function<void()>& fn, bool force)
+DLL_EXPORT void gscomms_execute_callback_on_main_thread(const std::function<void()>& fn, bool force)
 {
 	g_gameServer->InternalAddMainThreadCb(fn, force);
 }
@@ -1566,9 +1589,9 @@ void gscomms_send_packet(fx::Client* client, int peer, int channel, const net::B
 	g_gameServer->InternalSendPacket(client, peer, channel, buffer, flags);
 }
 
-void gscomms_get_peer(int peer, fx::NetPeerStackBuffer& stacKBuffer)
+void gscomms_get_peer(int peer, fx::NetPeerStackBuffer& stackBuffer)
 {
-	g_gameServer->InternalGetPeer(peer, stacKBuffer);
+	g_gameServer->InternalGetPeer(peer, stackBuffer);
 }
 
 static InitFunction initFunction([]()

@@ -9,7 +9,6 @@
 #include <Resource.h>
 #include <Error.h>
 
-#ifdef GTA_FIVE
 #include <ScriptHandlerMgr.h>
 #include <scrThread.h>
 #include <scrEngine.h>
@@ -59,6 +58,10 @@ struct DummyThread : public GtaThread
 };
 
 static std::stack<rage::scrThread*> g_lastThreads;
+
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+static std::stack<UpdatingScriptThreadsScope> g_scopes;
+#endif
 
 struct MissionCleanupData
 {
@@ -169,6 +172,11 @@ static InitFunction initFunction([] ()
 			GtaThread* gtaThread = data->dummyThread;
 
 			g_lastThreads.push(rage::scrEngine::GetActiveThread());
+
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+			g_scopes.emplace(true);
+#endif
+
 			rage::scrEngine::SetActiveThread(gtaThread);
 
 			if (setScriptNow)
@@ -196,6 +204,13 @@ static InitFunction initFunction([] ()
 			{
 				return;
 			}
+
+#if defined(MISCLEAN_HAS_SCRIPT_PROCESS_TICK)
+			if (!g_scopes.empty())
+			{
+				g_scopes.pop();
+			}
+#endif
 
 			rage::scrThread* lastThread = nullptr;
 
@@ -251,18 +266,3 @@ static InitFunction initFunction([] ()
 		}, 10000);
 	}, -50);
 });
-#else
-#include <scrThread.h>
-#include <ResourceGameLifetimeEvents.h>
-
-GtaThread* g_resourceThread;
-
-static InitFunction initFunction([]()
-{
-	fx::Resource::OnInitializeInstance.Connect([](fx::Resource* resource)
-	{
-		resource->SetComponent(new fx::ResourceGameLifetimeEvents());
-	});
-});
-
-#endif

@@ -2,8 +2,7 @@ import { Injectable, NgZone, Inject, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 
-import { Observable } from 'rxjs/Observable';
-import { Subject } from 'rxjs/Subject';
+import { Observable, Subject } from 'rxjs';
 
 import { applyPatch } from 'fast-json-patch';
 
@@ -74,6 +73,8 @@ export class ServersService {
 
 	private onSortCB: ((servers: string[]) => void)[] = [];
 
+	private topServer: Server = undefined;
+
 	constructor(private httpClient: HttpClient, private domSanitizer: DomSanitizer, private zone: NgZone,
 		private gameService: GameService, @Inject(PLATFORM_ID) private platformId: any) {
 		this.requestEvent = new Subject<string>();
@@ -139,6 +140,70 @@ export class ServersService {
 				this.servers[server.address] = server;
 				this.serversEvent.next(server);
 			});
+
+		this.gameService.tryConnecting.subscribe(async (serverHost: string) => {
+			let server: Server = null;
+
+			this.gameService.connecting.emit(Server.fromObject(this.domSanitizer, serverHost, {}));
+
+			// strip join URL portion
+			if (serverHost.startsWith('cfx.re/join/')) {
+				serverHost = serverHost.substring(12);
+			} else if (serverHost.startsWith('https://cfx.re/join/')) {
+				serverHost = serverHost.substring(20);
+			}
+
+			// try finding the server in server detail
+			if (serverHost.indexOf('.') === -1 && serverHost.indexOf(':') === -1) {
+				try {
+					server = await this.getServer(serverHost, false);
+				} catch {}
+			}
+
+			// not found yet? try finding the join ID at least
+			if (!server) {
+				// fetch it
+				const serverID = await this.httpClient.post('https://nui-internal/gsclient/url', `url=${serverHost}`, {
+					responseType: 'text'
+				}).toPromise();
+
+				if (serverID && serverID !== '') {
+					try {
+						server = await this.getServer(serverID, false);
+					} catch {}
+				}
+			}
+
+			// meh, no progress at all. probably private/unlisted
+			// try getting dynamic.json to at least populate basic details
+			if (!server) {
+				try {
+					const serverData = await this.httpClient.post('https://nui-internal/gsclient/dynamic', `url=${serverHost}`, {
+						responseType: 'text'
+					}).toPromise();
+
+					if (serverData) {
+						const sd = JSON.parse(serverData);
+						sd.addr = serverHost;
+						sd.infoBlob = {};
+
+						server = Server.fromNative(this.domSanitizer, sd);
+					}
+				} catch { }
+			}
+
+			if (server) {
+				server.connectEndPoints = [serverHost];
+
+				gameService.connectTo(server);
+			} else {
+				const invokeNative: any = (<any>window).invokeNative;
+
+				if (invokeNative) {
+					invokeNative('connectTo', serverHost);
+				}
+			}
+		});
 	}
 
 	public onInitialized() {
@@ -255,6 +320,30 @@ export class ServersService {
 		return server;
 	}
 
+	public async getTopServer() {
+		if (this.topServer !== undefined) {
+			return this.topServer;
+		}
+
+		const server = await (async () => {
+			const languages = this.gameService.systemLanguages;
+
+			for (const language of languages) {
+				try {
+					return await this.httpClient.get(`https://servers-frontend.fivem.net/api/servers/top/${language}/`)
+						.toPromise()
+						.then((data: { Data: master.IServer }) => Server.fromObject(this.domSanitizer, data.Data.EndPoint, data.Data.Data));
+				} catch {}
+			}
+
+			return null;
+		})();
+
+		this.topServer = server;
+
+		return server;
+	}
+
 	public getServers(): Observable<Server> {
 		return this.serversEvent;
 	}
@@ -273,7 +362,8 @@ export class ServersService {
 	public loadPinConfig(): Promise<PinConfig> {
 		return this.httpClient.get('https://runtime.fivem.net/pins.json')
 			.toPromise()
-			.then((result: PinConfig) => result);
+			.then((result: PinConfig) => result)
+			.catch(() => new PinConfig());
 	}
 
 	parseAddress(addr: string): [string, number] {

@@ -77,7 +77,7 @@ static InitFunction initFunction([] ()
 	httpServer->AddRef();
 	httpServer->RegisterHandler(endpointMapper);
 
-	if (wcsstr(GetCommandLine(), L"ros:legit") == nullptr && wcsstr(GetCommandLine(), L"ros:steam") == nullptr)
+	if (wcsstr(GetCommandLine(), L"ros:legit") == nullptr && wcsstr(GetCommandLine(), L"ros:steam") == nullptr && wcsstr(GetCommandLine(), L"ros:epic") == nullptr)
 	{
 		auto domains = {
 			"prod.ros.rockstargames.com",
@@ -148,7 +148,7 @@ static InitFunction initFunction([] ()
 	if (initState->IsGameProcess() || wcsstr(GetCommandLineW(), L"ros:legit"))
 #endif
 	{
-		net::PeerAddress address = net::PeerAddress::FromString("localhost:32891").get();
+		net::PeerAddress address = net::PeerAddress::FromString("127.0.0.1:32891", 32891, net::PeerAddress::LookupType::NoResolution).get();
 
 		fwRefContainer<net::TcpServerFactory> manager = new net::TcpServerManager();
 		fwRefContainer<net::TcpServer> tcpServer = manager->CreateServer(address);

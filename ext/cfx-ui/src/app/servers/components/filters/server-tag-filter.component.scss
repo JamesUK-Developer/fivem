@@ -33,9 +33,9 @@
 		margin-top: var(--qh);
 		margin-left: var(--q1);
 
+		@include fontMontserrat;
 		font-size: var(--fs-2);
 		font-weight: bold;
-		font-family: 'Montserrat';
 		line-height: 1;
 		letter-spacing: 2px;
 		text-transform: uppercase;
@@ -63,15 +63,15 @@
 		border: none;
 		background-color: transparent;
 
+		@include fontMontserrat;
 		font-size: var(--fs-075);
-		font-family: Montserrat;
 		letter-spacing: 1px;
 		text-transform: uppercase;
 
 		@include theme() using ($theme) {
 			color: gtv($theme, fgColor);
 
-			&:hover {
+			&:hover, &:focus {
 				color: gtv($theme, accentContrastColor);
 				background-color: gtv($theme, accentColor1);
 			}
@@ -118,7 +118,7 @@
 					background-image: linear-gradient(45deg, transparent, gtv($theme, activeColor));
 				};
 
-				&:hover {
+				&:hover, &:focus {
 					@include theme using ($theme) {
 						background-color: gtv($theme, inactiveColor);
 					};
@@ -143,7 +143,7 @@
 				opacity: .75;
 			}
 
-			&:hover {
+			&:hover, &:focus {
 				transition: none;
 
 				@include theme using ($theme) {

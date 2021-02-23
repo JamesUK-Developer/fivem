@@ -3,11 +3,17 @@
 
 #include <ScriptSerialization.h>
 #include <NetworkPlayerMgr.h>
+#include <scrEngine.h>
 
 #include <Hooking.h>
 
 static int(*netInterface_GetNumPhysicalPlayers)();
 static CNetGamePlayer** (*netInterface_GetAllPhysicalPlayers)();
+
+enum NativeIdentifiers : uint64_t
+{
+	GET_PLAYER_PED = 0x43A66C31C68491C0
+};
 
 static void* getAndCheckPlayerInfo(fx::ScriptContext& context)
 {
@@ -54,8 +60,7 @@ static HookFunction hookFunction([]()
 	VehicleDefenseModifierOffset = *hook::get_pattern<int>("F6 C1 ? 75 ? 48 8B 83 ? ? ? ? 48 8B 4E", 0x13);
 	WeaponDefenseModifier2Offset = *hook::get_pattern<int>("F3 0F 11 80 ? ? ? ? 8A 87 ? ? ? ? C0 E0", 0x4);
 	MeleeWeaponDamageModifierOffset = *hook::get_pattern<int>("F3 0F 11 80 ? ? ? ? F3 0F 10 8F ? ? ? ? 48 8B 85", 0x4);
-	// #TODO2060
-	//MeleeWeaponDefenseModifierOffset = *hook::get_pattern<int>("45 84 45 ? 74 ? 48 8B 83", 0x11);
+	MeleeWeaponDefenseModifierOffset = *hook::get_pattern<int>("45 84 ? ? 74 ? 48 8B 83", 0x11);
 
 	{
 		auto location = hook::get_pattern<char>("48 8B F8 E8 ? ? ? ? F3 0F 10 00 F3 0F 10 48 04", -0x5A);
@@ -76,6 +81,23 @@ static HookFunction hookFunction([]()
 		}
 
 		context.SetResult(fx::SerializeObject(playerList));
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_INVINCIBLE_2", [](fx::ScriptContext& context)
+	{
+		bool result = false;
+		
+		int playerPedId = NativeInvoke::Invoke<GET_PLAYER_PED, int>(context.GetArgument<int>(0));
+		fwEntity* entity = rage::fwScriptGuid::GetBaseFromGuid(playerPedId);
+
+		if (entity && entity->IsOfType<CPed>())
+		{
+			auto address = (char*)entity;
+			DWORD flag = *(DWORD *)(address + 0x188);  
+			result = ((flag & (1 << 8)) != 0) || ((flag & (1 << 9)) != 0);
+		}
+
+		context.SetResult<bool>(result);
 	});
 
 	using namespace std::placeholders;

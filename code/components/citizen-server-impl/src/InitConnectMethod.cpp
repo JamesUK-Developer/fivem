@@ -272,12 +272,24 @@ static InitFunction initFunction([]()
 		auto shVar = instance->AddVariable<bool>("sv_scriptHookAllowed", ConVar_ServerInfo, false);
 		auto ehVar = instance->AddVariable<bool>("sv_enhancedHostSupport", ConVar_ServerInfo, false);
 
+		// list of space-separated endpoints that can but don't have to include a port
+		// for example: sv_endpoints "123.123.123.123 124.124.124.124"
+		auto srvEndpoints = instance->AddVariable<std::string>("sv_endpoints", ConVar_None, "");
 		auto lanVar = instance->AddVariable<bool>("sv_lan", ConVar_ServerInfo, false);
 
-		auto enforceGameBuildVar = instance->AddVariable<std::string>("sv_enforceGameBuild", ConVar_ReadOnly, "", &g_enforcedGameBuild);
+		g_enforcedGameBuild = "1604";
+		auto enforceGameBuildVar = instance->AddVariable<std::string>("sv_enforceGameBuild", ConVar_ReadOnly | ConVar_ServerInfo, "1604", &g_enforcedGameBuild);
 
-		instance->GetComponent<fx::GameServer>()->OnTick.Connect([instance]()
+		instance->GetComponent<fx::GameServer>()->OnTick.Connect([instance, enforceGameBuildVar]()
 		{
+			if (instance->GetComponent<fx::GameServer>()->GetGameName() == fx::GameName::RDR3)
+			{
+				if (g_enforcedGameBuild == "1604")
+				{
+					enforceGameBuildVar->GetHelper()->SetRawValue("1311");
+				}
+			}
+
 			auto clientRegistry = instance->GetComponent<fx::ClientRegistry>();
 
 			clientRegistry->ForAllClients([](const fx::ClientSharedPtr& client)
@@ -296,7 +308,7 @@ static InitFunction initFunction([]()
 			});
 		});
 
-		instance->GetComponent<fx::ClientMethodRegistry>()->AddHandler("getEndpoints", [instance](const std::map<std::string, std::string>& postMap, const fwRefContainer<net::HttpRequest>& request, const std::function<void(const json&)>& cb)
+		instance->GetComponent<fx::ClientMethodRegistry>()->AddHandler("getEndpoints", [instance, srvEndpoints](const std::map<std::string, std::string>& postMap, const fwRefContainer<net::HttpRequest>& request, const std::function<void(const json&)>& cb)
 		{
 			auto sendError = [=](const std::string& error)
 			{
@@ -314,17 +326,13 @@ static InitFunction initFunction([]()
 
 			auto clientRegistry = instance->GetComponent<fx::ClientRegistry>();
 			auto client = clientRegistry->GetClientByConnectionToken(tokenIt->second);
-			// list of space-separated endpoints that can but don't have to include a port
-			// for example: sv_endpoints "123.123.123.123 124.124.124.124"
-			auto srvEndpoints = instance->AddVariable<std::string>("sv_endpoints", ConVar_None, "");
-			auto endpointList = srvEndpoints->GetValue();
-
 			if (!client)
 			{
 				cb(json{ false });
 			}
 			else
 			{
+				auto endpointList = srvEndpoints->GetValue();
 				if (endpointList.empty()) 
 				{
 					cb(json::array());
@@ -485,7 +493,7 @@ static InitFunction initFunction([]()
 
 			json data = json::object();
 			data["protocol"] = 5;
-			data["bitVersion"] = 0x202007151853;
+			data["bitVersion"] = 0x202011231556;
 			data["sH"] = shVar->GetValue();
 			data["enhancedHostSupport"] = ehVar->GetValue() && !fx::IsOneSync();
 			data["onesync"] = fx::IsOneSync();
@@ -636,15 +644,19 @@ static InitFunction initFunction([]()
 					return;
 				}
 
-				if (!enforceGameBuildVar->GetValue().empty() && enforceGameBuildVar->GetValue() != gameBuild)
+				auto svGame = instance->GetComponent<fx::GameServer>()->GetGameName();
+				bool canEnforceBuild = (svGame == fx::GameName::GTA5 || svGame == fx::GameName::RDR3);
+
+				if (canEnforceBuild && !enforceGameBuildVar->GetValue().empty() && enforceGameBuildVar->GetValue() != gameBuild)
 				{
 					clientRegistry->RemoveClient(lockedClient);
 
 					sendError(
 						fmt::sprintf(
-							"This server requires a different game build (%s) from the one you're using (%s). Tell the server owner to remove this check.",
+							"This server requires a different game build (%s) from the one you're using (%s).%s",
 							enforceGameBuildVar->GetValue(),
-							gameBuild
+							gameBuild,
+							(svGame == fx::GameName::GTA5) ? " Tell the server owner to remove this check." : ""
 						)
 					);
 
@@ -710,8 +722,21 @@ static InitFunction initFunction([]()
 					*deferrals = nullptr;
 				});
 
-				(*deferrals)->SetRejectCallback([deferrals, cbRef, clientWeak, clientRegistry](const std::string& message)
+				auto earlyReject = std::make_shared<bool>(false);
+				auto weakEarlyReject = std::weak_ptr(earlyReject);
+				auto weakNoReason = std::weak_ptr(noReason);
+
+				(*deferrals)->SetRejectCallback([deferrals, cbRef, clientWeak, clientRegistry, weakEarlyReject, weakNoReason](const std::string& message)
 				{
+					auto earlyReject = weakEarlyReject.lock();
+					auto noReason = weakNoReason.lock();
+
+					if (earlyReject && noReason)
+					{
+						*noReason = std::make_shared<std::string>(message);
+						*earlyReject = true;
+					}
+
 					auto newLockedClient = clientWeak.lock();
 					if (newLockedClient)
 					{
@@ -812,6 +837,14 @@ static InitFunction initFunction([]()
 				}), (*deferrals)->GetCallbacks());
 
 				if (!shouldAllow)
+				{
+					clientRegistry->RemoveClient(lockedClient);
+
+					sendError(**noReason);
+					return;
+				}
+
+				if (*earlyReject)
 				{
 					clientRegistry->RemoveClient(lockedClient);
 

@@ -19,13 +19,25 @@
 
 #include <regex>
 
-#ifndef IS_LAUNCHER
+#if __has_include("nutsnbolts.h")
 #include <nutsnbolts.h>
 #endif
 
 #include <se/Security.h>
 
 #include <concurrent_queue.h>
+
+DLL_EXPORT console::Context* g_customConsoleContext;
+
+console::Context* GetConsoleContext()
+{
+	if (g_customConsoleContext)
+	{
+		return g_customConsoleContext;
+	}
+
+	return console::GetDefaultContext();
+}
 
 extern ImFont* consoleFontSmall;
 extern ImFont* consoleFontTiny;
@@ -202,6 +214,8 @@ struct FiveMConsoleBase
 	}
 };
 
+extern float g_menuHeight;
+
 struct CfxBigConsole : FiveMConsoleBase
 {
 	char InputBuf[1024];
@@ -254,8 +268,14 @@ struct CfxBigConsole : FiveMConsoleBase
 			return;
 		}
 
-		ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, ImGui::GetFrameHeightWithSpacing() * 12.0f), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowPos(ImVec2(ImGui::GetMainViewport()->Pos.x + 0, ImGui::GetMainViewport()->Pos.y + g_menuHeight));
+		ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, 
+#ifndef IS_FXSERVER
+							     ImGui::GetFrameHeightWithSpacing() * 12.0f
+#else
+								 ImGui::GetIO().DisplaySize.y - g_menuHeight
+#endif
+		), ImGuiCond_Always);
 
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
@@ -402,26 +422,34 @@ struct CfxBigConsole : FiveMConsoleBase
 			}
 
 			// Build a list of candidates
-			ImVector<const char*> candidates;
+			std::set<std::string> candidates;
+
+			GetConsoleContext()->GetCommandManager()->ForAllCommands([&](const std::string& command)
+			{
+				if (Strnicmp(command.c_str(), word_start, (int)(word_end - word_start)) == 0)
+				{
+					candidates.insert(command);
+				}
+			});
 
 			console::GetDefaultContext()->GetCommandManager()->ForAllCommands([&](const std::string& command)
 			{
 				if (Strnicmp(command.c_str(), word_start, (int)(word_end - word_start)) == 0)
 				{
-					candidates.push_back(Strdup(command.c_str()));
+					candidates.insert(command);
 				}
 			});
 
-			if (candidates.Size == 0)
+			if (candidates.empty())
 			{
 				// No match
 				AddLog("", "No match for \"%.*s\"!\n", (int)(word_end - word_start), word_start);
 			}
-			else if (candidates.Size == 1)
+			else if (candidates.size() == 1)
 			{
 				// Single match. Delete the beginning of the word and replace it entirely so we've got nice casing
 				data->DeleteChars((int)(word_start - data->Buf), (int)(word_end - word_start));
-				data->InsertChars(data->CursorPos, candidates[0]);
+				data->InsertChars(data->CursorPos, candidates.begin()->c_str());
 				data->InsertChars(data->CursorPos, " ");
 			}
 			else
@@ -432,11 +460,21 @@ struct CfxBigConsole : FiveMConsoleBase
 				{
 					int c = 0;
 					bool all_candidates_matches = true;
-					for (int i = 0; i < candidates.Size && all_candidates_matches; i++)
+					int i = 0;
+					for (const auto& candidate : candidates)
+					{
 						if (i == 0)
-							c = toupper(candidates[i][match_len]);
-						else if (c == 0 || c != toupper(candidates[i][match_len]))
+							c = toupper(candidate[match_len]);
+						else if (c == 0 || c != toupper(candidate[match_len]))
 							all_candidates_matches = false;
+
+						i++;
+
+						if (!all_candidates_matches)
+						{
+							break;
+						}
+					}
 					if (!all_candidates_matches)
 						break;
 					match_len++;
@@ -445,18 +483,13 @@ struct CfxBigConsole : FiveMConsoleBase
 				if (match_len > 0)
 				{
 					data->DeleteChars((int)(word_start - data->Buf), (int)(word_end - word_start));
-					data->InsertChars(data->CursorPos, candidates[0], candidates[0] + match_len);
+					data->InsertChars(data->CursorPos, candidates.begin()->c_str(), candidates.begin()->c_str() + match_len);
 				}
 
 				// List matches
 				AddLog("", "Possible matches:\n");
-				for (int i = 0; i < candidates.Size; i++)
-					AddLog("", "- %s\n", candidates[i]);
-			}
-
-			for (auto& candidate : candidates)
-			{
-				free(const_cast<char*>(candidate));
+				for (const auto& candidate : candidates)
+					AddLog("", "- %s\n", candidate.c_str());
 			}
 
 			break;
@@ -498,9 +531,9 @@ struct CfxBigConsole : FiveMConsoleBase
 		{
 			se::ScopedPrincipal scope(se::Principal{ "system.console" });
 
-			console::GetDefaultContext()->AddToBuffer(command_line);
-			console::GetDefaultContext()->AddToBuffer("\n");
-			console::GetDefaultContext()->ExecuteBuffer();
+			GetConsoleContext()->AddToBuffer(command_line);
+			GetConsoleContext()->AddToBuffer("\n");
+			GetConsoleContext()->ExecuteBuffer();
 		}
 	}
 };
@@ -545,7 +578,7 @@ struct MiniConsole : CfxBigConsole
 		ImGui::PushFont(consoleFontSmall);
 
 		ImGui::SetNextWindowBgAlpha(0.0f);
-		ImGui::SetNextWindowPos(ImVec2(20, io.DisplaySize.y - 20), ImGuiCond_Once, ImVec2(0.0f, 1.0f));
+		ImGui::SetNextWindowPos(ImVec2(ImGui::GetMainViewport()->Pos.x + 20, ImGui::GetMainViewport()->Pos.y + io.DisplaySize.y - 20), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
 		ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.4f, ImGui::GetFrameHeightWithSpacing() * 12.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4)); // Tighten spacing
@@ -668,9 +701,12 @@ struct MiniConsole : CfxBigConsole
 };
 
 static std::unique_ptr<FiveMConsoleBase> g_consoles[2];
+static std::recursive_mutex g_consolesMutex;
 
 static void EnsureConsoles()
 {
+	std::unique_lock _(g_consolesMutex);
+
 	if (!g_consoles[0])
 	{
 		g_consoles[0] = std::make_unique<CfxBigConsole>();
@@ -698,13 +734,17 @@ void DrawMiniConsole()
 
 void SendPrintMessage(const std::string& channel, const std::string& message)
 {
-	EnsureConsoles();
-
-	for (auto& console : g_consoles)
 	{
-		if (console->Items.Size == 0)
+		std::unique_lock _(g_consolesMutex);
+
+		EnsureConsoles();
+
+		for (auto& console : g_consoles)
 		{
-			console->AddLog("", "");
+			if (console->Items.Size == 0)
+			{
+				console->AddLog("", "");
+			}
 		}
 	}
 
@@ -773,7 +813,7 @@ DLL_EXPORT void RunConsoleGameFrame()
 	}
 }
 
-#ifndef IS_LAUNCHER
+#if __has_include("nutsnbolts.h")
 static InitFunction initFunction([]()
 {
 	ConHost::OnShouldDrawGui.Connect([](bool* should)

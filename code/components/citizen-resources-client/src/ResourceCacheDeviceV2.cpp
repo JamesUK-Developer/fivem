@@ -32,6 +32,7 @@
 
 #include <IteratorView.h>
 
+extern tbb::concurrent_unordered_map<std::string, bool> g_stuffWritten;
 extern std::unordered_multimap<std::string, std::pair<std::string, std::string>> g_referenceHashList;
 
 namespace resources
@@ -80,9 +81,10 @@ bool RcdBaseStream::EnsureRead(const std::function<void(bool, const std::string&
 				}
 			}
 
-			m_metaData = task.get().metaData;
+			const auto& result = task.get();
+			m_metaData = result.metaData;
 
-			const auto& localPath = task.get().localPath;
+			const auto& localPath = result.localPath;
 			m_parentDevice = vfs::GetDevice(localPath);
 			assert(m_parentDevice.GetRef());
 
@@ -274,16 +276,20 @@ bool ResourceCacheDeviceV2::ExistsOnDisk(const std::string& fileName)
 	}
 
 	const std::string& localPath = cacheEntry->GetLocalPath();
-	auto device = vfs::GetDevice(localPath);
 
-	if (!device.GetRef())
+	if (g_stuffWritten.find(localPath) == g_stuffWritten.end())
 	{
-		return false;
-	}
+		auto device = vfs::GetDevice(localPath);
 
-	if (device->GetAttributes(localPath) == -1)
-	{
-		return false;
+		if (!device.GetRef())
+		{
+			return false;
+		}
+
+		if (device->GetAttributes(localPath) == -1)
+		{
+			return false;
+		}
 	}
 
 	return true;
@@ -377,6 +383,9 @@ concurrency::task<RcdFetchResult> ResourceCacheDeviceV2::DoFetch(const ResourceC
 				SHA_CTX sha1;
 				size_t numRead;
 
+				size_t readNow = 0;
+				size_t readTotal = localStream->GetLength();
+
 				// initialize context
 				SHA1_Init(&sha1);
 
@@ -387,6 +396,9 @@ concurrency::task<RcdFetchResult> ResourceCacheDeviceV2::DoFetch(const ResourceC
 					{
 						break;
 					}
+
+					readNow += numRead;
+					fx::OnCacheVerifyStatus(fmt::sprintf("%s%s/%s", m_pathPrefix, entry.resourceName, entry.basename), readNow, readTotal);
 
 					SHA1_Update(&sha1, reinterpret_cast<char*>(&data[0]), numRead);
 				}
@@ -419,7 +431,7 @@ concurrency::task<RcdFetchResult> ResourceCacheDeviceV2::DoFetch(const ResourceC
 		}
 		else if (downloaded)
 		{
-			lastError = "Failed to add entry to local storage";
+			lastError = "Failed to add entry to local storage (download corrupted?)";
 		}
 		
 		if (!result)
@@ -557,11 +569,23 @@ std::optional<std::reference_wrapper<const ResourceCacheEntryList::Entry>> Resou
 
 #define VFS_GET_RAGE_PAGE_FLAGS 0x20001
 
+#ifndef IS_RDR3
 struct ResourceFlags
 {
 	uint32_t flag1;
 	uint32_t flag2;
 };
+#else
+struct ResourceFlags
+{
+	uint32_t magic; // 'RSC8'
+	uint32_t version;
+	uint32_t virtPages;
+	uint32_t physPages;
+	uint64_t fileSize;
+	uint64_t fileTime;
+};
+#endif
 
 struct GetRagePageFlagsExtension
 {
@@ -640,9 +664,25 @@ bool ResourceCacheDeviceV2::ExtensionCtl(int controlIdx, void* controlData, size
 		{
 			auto extData = entry->get().extData;
 
+#ifdef IS_RDR3
+			SYSTEMTIME st;
+			GetSystemTime(&st);
+
+			FILETIME ft;
+			SystemTimeToFileTime(&st, &ft);
+
+			data->version = atoi(extData["rscVersion"].c_str());
+			data->flags.magic = 0x38435352;
+			data->flags.fileSize = entry->get().size;
+			data->flags.fileTime = ((uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime);
+			data->flags.version = atoi(extData["rscVersion"].c_str());
+			data->flags.virtPages = strtoul(extData["rscPagesVirtual"].c_str(), nullptr, 10);
+			data->flags.physPages = strtoul(extData["rscPagesPhysical"].c_str(), nullptr, 10);
+#else
 			data->version = atoi(extData["rscVersion"].c_str());
 			data->flags.flag1 = strtoul(extData["rscPagesVirtual"].c_str(), nullptr, 10);
 			data->flags.flag2 = strtoul(extData["rscPagesPhysical"].c_str(), nullptr, 10);
+#endif
 			return true;
 		}
 	}
@@ -665,15 +705,6 @@ bool ResourceCacheDeviceV2::ExtensionCtl(int controlIdx, void* controlData, size
 			vfs::Device::THandle hdl;
 		};
 
-		{
-			THandle hdl;
-
-			while (m_handleDeleteQueue.try_pop(hdl))
-			{
-				CloseBulk(hdl);
-			}
-		}
-
 		RequestHandleExtension* data = (RequestHandleExtension*)controlData;
 
 		auto handle = std::make_shared<HandleContainer>(this, data->handle);
@@ -682,6 +713,15 @@ bool ResourceCacheDeviceV2::ExtensionCtl(int controlIdx, void* controlData, size
 
 		tp_work work{ [this, handle, hd, cb]()
 			{
+				{
+					THandle hdl;
+
+					while (m_handleDeleteQueue.try_pop(hdl))
+					{
+						CloseBulk(hdl);
+					}
+				}
+
 				try
 				{
 					hd->bulkStream->EnsureRead([this, handle, cb](bool success, const std::string& error)

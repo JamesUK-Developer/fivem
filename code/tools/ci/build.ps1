@@ -23,7 +23,7 @@ param (
     $Identity = "C:\guava_deploy.ppk"
 )
 
-$CefName = "cef_binary_83.0.0-shared-textures.2175+g5430a8e+chromium-83.0.4103.0_windows64_hf1_minimal"
+$CefName = "cef_binary_83.0.0-shared-textures.2175+g5430a8e+chromium-83.0.4103.0_windows64_20210210_minimal"
 
 # from http://stackoverflow.com/questions/2124753/how-i-can-use-powershell-with-the-visual-studio-command-prompt
 function Invoke-BatchFile
@@ -63,13 +63,11 @@ function Invoke-WebHook
 
     iwr -UseBasicParsing -Uri $env:TG_WEBHOOK -Method POST -Headers @{'Content-Type' = 'application/json'} -Body (ConvertTo-Json -Compress -InputObject $payload) | out-null
 
-    $payload.text += " <:mascot:295575900446130176>"#<@&297070674898321408>"
-
+    $payload.text += " <:mascot:780071492469653515>"#<@&297070674898321408>"
     iwr -UseBasicParsing -Uri $env:DISCORD_WEBHOOK -Method POST -Headers @{'Content-Type' = 'application/json'} -Body (ConvertTo-Json -Compress -InputObject $payload) | out-null
 }
 
-$UseNewCI = $false
-$inCI = $false
+$UseNewCI = $true
 $Triggerer = "$env:USERDOMAIN\$env:USERNAME"
 $UploadBranch = "canary"
 $IsServer = $false
@@ -252,7 +250,7 @@ if (!$DontBuild)
 	    
 	    $CIBranch = "master-old"
 	    
-	    if (!$IsServer -and !$IsRDR -and $UseNewCI) {
+	    if ($UseNewCI) {
 			$CIBranch = "master"
 	    }
 
@@ -285,6 +283,10 @@ if (!$DontBuild)
     } elseif ($IsRDR) {
         $GameName = "rdr3"
         $BuildPath = "$BuildRoot\rdr3"
+    }
+    
+    if ($IsServer) {
+		Invoke-Expression "& $WorkRootDir\tools\ci\build_rs.cmd"
     }
 
     Invoke-Expression "& $WorkRootDir\tools\ci\premake5 vs2019 --game=$GameName --builddir=$BuildRoot --bindir=$BinRoot"
@@ -371,6 +373,7 @@ if (!$DontBuild -and $IsServer) {
     Copy-Item -Force "$WorkRootDir\tools\ci\7z.exe" 7z.exe
 
     .\7z.exe a -mx=9 $WorkDir\out\server.zip $WorkDir\out\server\*
+    .\7z.exe a -mx=7 $WorkDir\out\server.7z $WorkDir\out\server\*
 
     $uri = 'https://sentry.fivem.net/api/0/organizations/citizenfx/releases/'
     $json = @{
@@ -392,7 +395,7 @@ if (!$DontBuild -and $IsServer) {
     Invoke-WebHook "Bloop, building a SERVER/WINDOWS build completed!"
 }
 
-$CacheDir = "$SaveDir\caches"
+$CacheDir = "$SaveDir\caches\$Branch"
 
 if ($IsLauncher) {
     $CacheDir = "$SaveDir\lcaches"
@@ -489,7 +492,7 @@ if (!$DontBuild -and !$IsServer) {
     "$GameVersion" | Out-File -Encoding ascii $CacheDir\fivereborn\citizen\version.txt
     "${env:CI_PIPELINE_ID}" | Out-File -Encoding ascii $CacheDir\fivereborn\citizen\release.txt
 
-    if ($IsRDR -or !$UseNewCI) {
+    if (!$UseNewCI) {
         if (Test-Path $CacheDir\fivereborn\adhesive.dll) {
             Remove-Item -Force $CacheDir\fivereborn\adhesive.dll
         }

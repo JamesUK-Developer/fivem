@@ -96,7 +96,7 @@ public:
 
 	}
 
-	virtual THandle Open(const std::string& fileName, bool readOnly) override
+	bool FilterFile(const std::string& fileName)
 	{
 		std::string relPath = fileName.substr(strlen("commonFilter:/"));
 
@@ -110,10 +110,30 @@ public:
 			relPath == "data/ai/scenarios.meta" ||
 			relPath == "data/ai/conditionalanims.meta")
 		{
+			return true;
+		}
+
+		return false;
+	}
+
+	virtual THandle Open(const std::string& fileName, bool readOnly) override
+	{
+		if (FilterFile(fileName))
+		{
 			return InvalidHandle;
 		}
 
 		return RelativeDevice::Open(fileName, readOnly);
+	}
+
+	virtual uint32_t GetAttributes(const std::string& fileName) override
+	{
+		if (FilterFile(fileName))
+		{
+			return -1;
+		}
+
+		return RelativeDevice::GetAttributes(fileName);
 	}
 };
 
@@ -226,6 +246,18 @@ static InitFunction initFunction([] ()
 			relativeDeviceCrc->Mount("platformcrc:/");
 		}
 
+		{
+			auto narrowPath = ToNarrow(MakeRelativeCitPath(fmt::sprintf(L"citizen\\platform-%d", xbr::GetGameBuild())));
+
+			rage::fiDeviceRelative* relativeDevice = new rage::fiDeviceRelative();
+			relativeDevice->SetPath(narrowPath.c_str(), nullptr, true);
+			relativeDevice->Mount("platform:/");
+
+			rage::fiDeviceRelative* relativeDeviceCrc = new rage::fiDeviceRelative();
+			relativeDeviceCrc->SetPath(narrowPath.c_str(), nullptr, true);
+			relativeDeviceCrc->Mount("platformcrc:/");
+		}
+
 		if (CfxIsSinglePlayer() || true)
 		{
 			rage::fiFindData findData;
@@ -293,6 +325,7 @@ static InitFunction initFunction([] ()
 			}
 		}
 
+#if 0
 		// look for files in citizen\common\data
 		rage::fiFindData findData;
 		auto handle = device->FindFirst("citizen:/common/data/", &findData);
@@ -325,5 +358,6 @@ static InitFunction initFunction([] ()
 
 			device->FindClose(handle);
 		}
+#endif
 	});
 });

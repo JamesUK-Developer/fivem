@@ -149,6 +149,8 @@ private:
 private:
 	LuaStateHolder m_state;
 
+	lua_CFunction m_dbTraceback;
+
 	IScriptHost* m_scriptHost;
 
 	IScriptHostWithResourceData* m_resourceHost;
@@ -253,6 +255,11 @@ public:
 		return m_nativesDir;
 	}
 
+	inline lua_CFunction GetDbTraceback()
+	{
+		return m_dbTraceback;
+	}
+
 private:
 	result_t LoadFileInternal(OMPtr<fxIStream> stream, char* scriptFile);
 
@@ -315,8 +322,6 @@ LuaScriptRuntime::~LuaScriptRuntime()
 {
 }
 
-static int lua_error_handler(lua_State* L);
-
 lua_CFunction Lua_GetNative(lua_State* L, const char* name);
 
 const OMPtr<LuaScriptRuntime>& LuaScriptRuntime::GetCurrent()
@@ -326,7 +331,7 @@ const OMPtr<LuaScriptRuntime>& LuaScriptRuntime::GetCurrent()
 	OMPtr<IScriptRuntime> runtime;
 
 	assert(FX_SUCCEEDED(fx::GetCurrentScriptRuntime(&runtime)));
-	assert(luaRuntime = dynamic_cast<LuaScriptRuntime*>(runtime.GetRef()));
+	assert(luaRuntime = static_cast<LuaScriptRuntime*>(runtime.GetRef()));
 
 	assert(luaRuntime == g_currentLuaRuntime.GetRef());
 #endif
@@ -389,11 +394,7 @@ static int Lua_SetTickRoutine(lua_State* L)
 	luaRuntime->SetTickRoutine([=]()
 	{
 		// set the error handler
-		//lua_pushcfunction(L, lua_error_handler);
-
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -445,9 +446,7 @@ static int Lua_SetStackTraceRoutine(lua_State* L)
 		static std::vector<char> retvalArray(32768);
 
 		// set the error handler
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -543,9 +542,7 @@ static int Lua_SetEventRoutine(lua_State* L)
 	luaRuntime->SetEventRoutine([=](const char* eventName, const char* eventPayload, size_t payloadSize, const char* eventSource)
 	{
 		// set the error handler
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -596,9 +593,7 @@ static int Lua_SetCallRefRoutine(lua_State* L)
 		static std::vector<char> retvalArray(32768);
 
 		// set the error handler
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -655,9 +650,7 @@ static int Lua_SetDeleteRefRoutine(lua_State* L)
 	luaRuntime->SetDeleteRefRoutine([=](int32_t refId)
 	{
 		// set the error handler
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -695,9 +688,7 @@ static int Lua_SetDuplicateRefRoutine(lua_State* L)
 	luaRuntime->SetDuplicateRefRoutine([=](int32_t refId)
 	{
 		// set the error handler
-		lua_getglobal(L, "debug");
-		lua_getfield(L, -1, "traceback");
-		lua_replace(L, -2);
+		lua_pushcfunction(L, luaRuntime->GetDbTraceback());
 
 		int eh = lua_gettop(L);
 
@@ -1418,7 +1409,9 @@ int Lua_LoadNative(lua_State* L)
 		runtime->GetScriptHost2()->GetNumResourceMetaData("use_fxv2_oal", &isCfxv2);
 	}
 
+//#if !defined(GTA_FIVE) || (LUA_VERSION_NUM == 504)
 	if (isCfxv2)
+//#endif
 	{
 		auto nativeImpl = Lua_GetNative(L, fn);
 
@@ -1619,6 +1612,20 @@ result_t LuaScriptRuntime::Create(IScriptHost* scriptHost)
 	}
 
 	safe_openlibs(m_state);
+
+	{
+		// 0
+		lua_getglobal(m_state, "debug");
+
+		// 1
+		lua_getfield(m_state, -1, "traceback");
+
+		// 2
+		m_dbTraceback = lua_tocfunction(m_state, -1);
+		lua_pop(m_state, 2);
+
+		// 0
+	}
 
 	// register the 'Citizen' library
 	lua_newtable(m_state);
@@ -1831,33 +1838,10 @@ result_t LuaScriptRuntime::LoadSystemFileInternal(char* scriptFile)
 	return LoadFileInternal(stream, scriptFile);
 }
 
-static int lua_error_handler(lua_State* L)
-{
-	lua_getglobal(L, "debug");
-	lua_getfield(L, -1, "traceback");
-
-	lua_pop(L, -2);
-
-	lua_pushvalue(L, 1);
-	lua_pushinteger(L, 2);
-
-	lua_call(L, 2, 1);
-
-	// TODO: proper log channels for this purpose
-	ScriptTrace("Lua error: %s\n", lua_tostring(L, -1));
-
-	return 1;
-}
-
 result_t LuaScriptRuntime::RunFileInternal(char* scriptName, std::function<result_t(char*)> loadFunction)
 {
 	LuaPushEnvironment pushed(this);
-
-	//lua_pushcfunction(m_state, lua_error_handler);
-
-	lua_getglobal(m_state, "debug");
-	lua_getfield(m_state, -1, "traceback");
-	lua_replace(m_state, -2);
+	lua_pushcfunction(m_state, GetDbTraceback());
 
 	int eh = lua_gettop(m_state);
 
@@ -2014,7 +1998,7 @@ result_t LuaScriptRuntime::RequestMemoryUsage()
 result_t LuaScriptRuntime::GetMemoryUsage(int64_t* memoryUsage)
 {
 	LuaPushEnvironment pushed(this);
-	*memoryUsage = (lua_gc(m_state, LUA_GCCOUNT, 0) * 1024) + lua_gc(m_state, LUA_GCCOUNTB, 0);
+	*memoryUsage = (int64_t(lua_gc(m_state, LUA_GCCOUNT, 0)) * 1024) + int64_t(lua_gc(m_state, LUA_GCCOUNTB, 0));
 
 	return FX_S_OK;
 }
@@ -2128,6 +2112,24 @@ struct LuaNativeWrapper
 	}
 };
 
+static LONG ShouldHandleUnwind(DWORD exceptionCode, uint64_t identifier)
+{
+	// C++ exceptions?
+	if (exceptionCode == 0xE06D7363)
+	{
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	// INVOKE_FUNCTION_REFERENCE crashing as top-level is usually related to native state corruption,
+	// we'll likely want to crash on this instead rather than on an assertion down the chain
+	if (identifier == HashString("INVOKE_FUNCTION_REFERENCE"))
+	{
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
 struct LuaNativeContext
 {
 	NativeContextRaw rawCxt;
@@ -2144,7 +2146,16 @@ struct LuaNativeContext
 
 	LUA_INLINE void Invoke(lua_State* L, uint64_t hash)
 	{
-		nw->handler(&rawCxt);
+		static void* exceptionAddress;
+
+		__try
+		{
+			nw->handler(&rawCxt);
+		}
+		__except (exceptionAddress = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress, ShouldHandleUnwind((GetExceptionInformation())->ExceptionRecord->ExceptionCode, hash))
+		{
+			throw std::exception(va("Error executing native 0x%016llx at address %p.", hash, exceptionAddress));
+		}
 	}
 
 	template<typename TVal>
@@ -2286,6 +2297,7 @@ LUA_INLINE void Lua_PushScrObject(lua_State* L, const scrObject& val)
 	lua_call(L, 1, 1);
 }
 
+#if 0 && LUA_VERSION_NUM < 504
 #ifndef IS_FXSERVER
 #include "Natives.h"
 #else
@@ -2298,6 +2310,12 @@ lua_CFunction Lua_GetNative(lua_State* L, const char* name)
 
 	return (it != natives.end()) ? it->second : nullptr;
 }
+#else
+lua_CFunction Lua_GetNative(lua_State* L, const char* name)
+{
+	return nullptr;
+}
+#endif
 
 #if LUA_VERSION_NUM == 504
 // {91A81564-E5F1-4FD6-BC6A-9865A081011D}

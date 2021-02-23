@@ -18,6 +18,46 @@ for _, v in ipairs(unsupList) do
 	unsup[v] = true
 end
 
+local function isSafeNative(native)
+	-- a native is 'safe' for this if
+	-- 1. the native has only int/string/bool arguments (float can be a vector, which is bad)
+	-- 2. 'trivial' return value (int, float, vector3, string, bool)
+	
+	local safe = true
+	
+	if native.name:sub(1, 2) == '0x' then
+		safe = false
+	end
+	
+	for argn, arg in pairs(native.arguments) do
+		if arg.type.nativeType ~= 'int' and
+		   arg.type.nativeType ~= 'bool' and
+		   arg.type.nativeType ~= 'string' or
+		   (arg.type.name == 'Any' or 
+		    arg.type.name == 'Hash') then
+			safe = false
+		end
+		
+		if arg.pointer then
+			safe = false
+		end
+	end
+	
+	if safe then
+		if native.returns then
+			if native.returns.nativeType ~= 'int' and
+			   native.returns.nativeType ~= 'bool' and
+			   native.returns.nativeType ~= 'vector3' and
+			   native.returns.nativeType ~= 'float' and
+			   native.returns.nativeType ~= 'string' then
+				safe = false
+			end
+		end
+	end
+	
+	return safe
+end
+
 local function isUnsupportedNative(native)
 	return unsup[native.name] and true or false
 end
@@ -32,7 +72,7 @@ local function parseArgumentType(type, native)
 	local argType
 
 	if type.name == 'Hash' then
-		argType = 'uint32_t'
+		argType = 'int32_t'
 	elseif type.name == 'uint' then
 		argType = 'uint32_t'
 	elseif type.nativeType == 'Any*' then
@@ -68,13 +108,15 @@ local function printTypeGetter(argument, native, idx)
 	elseif argument.type.nativeType == 'Any*' then
 		argType = 'lua_utointeger(L, ' .. idx .. ')'
 	elseif argument.type.nativeType == 'string' then
-		argType = 'lua_tostring(L, ' .. idx .. ')'
+		argType = '((lua_type(L, ' .. idx .. ') != LUA_TNUMBER || lua_utointeger(L, ' .. idx ..') != 0) ? lua_tostring(L, ' .. idx .. ') : 0)'
 	elseif argument.type.nativeType == 'int' then
 		argType = 'lua_utointeger(L, ' .. idx .. ')'
 	elseif argument.type.nativeType == 'float' then
 		argType = '(float)lua_utonumber(L, ' .. idx .. ')'
 	elseif argument.type.nativeType == 'bool' then
-		argType = 'lua_toboolean(L, ' .. idx .. ')'
+		--argType = 'lua_toboolean(L, ' .. idx .. ')'
+		-- 0 is truthy in lua, so let's use raw value access
+		argType = '(lua_utointeger(L, ' .. idx .. ') & 0xFF) != 0'
 	elseif argument.type.nativeType == 'vector3' then
 		argType = 'Lua_ToScrVector(L, ' .. idx .. ')'
 	elseif argument.type.name == 'func' then
@@ -157,10 +199,12 @@ local function printNative(native)
 	n = n .. t .. ("static LuaNativeWrapper nW(0x%016x);\n"):format(native.hash)
 	n = n .. t .. ("LuaNativeContext nCtx(&nW, %d);\n"):format(#native.arguments)
 	
-	n = n .. t .. ("ASSERT_LUA_ARGS(%d);\n"):format(expectedArgs)
+	--n = n .. t .. ("ASSERT_LUA_ARGS(%d);\n"):format(expectedArgs)
 	
 	local lIdx = 1
 	local aIdx = 0
+	
+	n = n .. t .. ("const int Ltop = lua_gettop(L);\n")
 
 	for argn, arg in pairs(native.arguments) do
 		if arg.pointer then
@@ -172,7 +216,7 @@ local function printNative(native)
 			
 			aIdx = aIdx + 1
 		else
-			n = n .. t .. ("nCtx.SetArgument(%d, %s); // %s\n"):format(aIdx, printTypeGetter(arg, native, lIdx), arg.name)
+			n = n .. t .. ("nCtx.SetArgument(%d, (%d <= Ltop && !lua_uisnil(L, %d)) ? %s : 0); // %s\n"):format(aIdx, aIdx + 1, aIdx + 1, printTypeGetter(arg, native, lIdx), arg.name)
 			
 			lIdx = lIdx + 1
 			
@@ -235,8 +279,11 @@ local function printNativeRef(native)
 	return n
 end
 
+local safeNatives = {}
+
 for _, v in pairs(_natives) do
-	if matchApiSet(v) then
+	if matchApiSet(v) and isSafeNative(v) then
+		safeNatives[v.hash] = true
 		print(printNative(v))
 	end
 end
@@ -244,7 +291,7 @@ end
 print("static const Lua_NativeMap natives = {")
 
 for _, v in pairs(_natives) do
-	if matchApiSet(v) then
+	if safeNatives[v.hash] and matchApiSet(v) then
 		print(printNativeRef(v))
 	end
 end

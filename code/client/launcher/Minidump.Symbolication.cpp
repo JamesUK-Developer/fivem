@@ -38,7 +38,7 @@ void ParseSymbolicCrash(nlohmann::json& crash, std::string* signature, std::stri
 			{
 				modName = "GTA5.exe";
 			}
-			else if (modName == "RedM_GTAProcess.exe")
+			else if (modName == "RedM_GTAProcess.exe" || modName == "RedM.exe")
 			{
 				modName = "RDR2.exe";
 			}
@@ -240,7 +240,7 @@ nlohmann::json SymbolicateCrash(HANDLE hProcess, HANDLE hThread, PEXCEPTION_RECO
 	});
 
 	auto r = cpr::Post(cpr::Url{ "https://crash-ingress.fivem.net/symbolicate?timeout=5" }, cpr::Body{ symb.dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace) },
-	cpr::Timeout{ std::chrono::seconds(10) }, cpr::Header{ { "content-type", "application/json"} });
+	cpr::Timeout{ std::chrono::seconds(10) }, cpr::Header{ { "content-type", "application/json" } }, cpr::VerifySsl{ false });
 
 	if (!r.error && r.status_code <= 299)
 	{

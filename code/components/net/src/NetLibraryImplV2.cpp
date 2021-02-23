@@ -38,6 +38,8 @@ public:
 
 	virtual bool IsDisconnected() override;
 
+	virtual int32_t GetPing() override;
+
 private:
 	void ProcessPacket(const uint8_t* data, size_t size, NetPacketMetrics& metrics, ENetPacketFlag flags);
 
@@ -151,8 +153,18 @@ void NetLibraryImplV2::SendData(const NetAddress& netAddress, const char* data, 
 	enet_socket_send(m_host->socket, &addr, &buffer, 1);
 }
 
+extern int g_serverVersion;
+
 bool NetLibraryImplV2::HasTimedOut()
 {
+	if (!m_serverPeer)
+	{
+		if (g_serverVersion >= 3419)
+		{
+			return true;
+		}
+	}
+
 	return m_timedOut;
 }
 
@@ -309,6 +321,9 @@ void NetLibraryImplV2::SendConnect(const std::string& connectData)
 	auto addr = m_base->GetCurrentServer().GetENetAddress();
 	m_serverPeer = enet_host_connect(m_host, &addr, 2, 0);
 
+	// all-but-disable the backoff-based timeout, and set the hard timeout to 30 seconds (equivalent to server-side check!)
+	enet_peer_timeout(m_serverPeer, 10000000, 10000000, 30000);
+
 #ifdef _DEBUG
 	//enet_peer_timeout(m_serverPeer, 86400 * 1000, 86400 * 1000, 86400 * 1000);
 #endif
@@ -424,6 +439,16 @@ void NetLibraryImplV2::ProcessPacket(const uint8_t* data, size_t size, NetPacket
 		// check to prevent double execution
 		m_base->HandleReliableCommand(msgType, reliableBuf.data(), reliableBuf.size());
 	}
+}
+
+int32_t NetLibraryImplV2::GetPing()
+{
+	if (m_serverPeer)
+	{
+		return int32_t(m_serverPeer->roundTripTime);
+	}
+
+	return -1;
 }
 
 static InitFunction initFunction([]()

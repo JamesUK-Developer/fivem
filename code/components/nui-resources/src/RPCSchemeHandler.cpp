@@ -23,6 +23,10 @@ private:
 	bool m_found;
 
 	fwString m_result;
+	std::multimap<std::string, std::string> m_headers;
+	int m_statusCode = 200;
+
+	std::mutex m_mutex;
 
 public:
 	RPCResourceHandler()
@@ -85,7 +89,7 @@ public:
 			path.erase(hash);
 		}
 
-		std::string postDataString = "null";
+		std::string postDataString;
 
 		if (request->GetMethod() == "POST")
 		{
@@ -129,9 +133,26 @@ public:
 			}
 		}
 
-		auto result = ui->InvokeCallback(path.substr(1), postDataString, [=] (const std::string& callResult)
+		std::multimap<std::string, std::string> headers;
+
+		CefRequest::HeaderMap origHeaders;
+		request->GetHeaderMap(origHeaders);
+
+		for (auto& header : origHeaders)
 		{
-			m_result = callResult;
+			headers.emplace(header.first.ToString(), header.second.ToString());
+		}
+
+		CefRefPtr<RPCResourceHandler> self = this;
+
+		auto result = ui->InvokeCallback(path.substr(1), headers, postDataString, [self, callback] (int statusCode, const std::multimap<std::string, std::string>& headers, const std::string& callResult)
+		{
+			{
+				std::unique_lock _(self->m_mutex);
+				self->m_headers = headers;
+				self->m_statusCode = statusCode;
+				self->m_result = callResult;
+			}
 
 			callback->Continue();
 		});
@@ -152,23 +173,42 @@ public:
 
 	virtual void GetResponseHeaders(CefRefPtr<CefResponse> response, int64& response_length, CefString& redirectUrl)
 	{
-		response->SetMimeType("application/json");
+		std::unique_lock _(m_mutex);
 
+		if (auto hit = m_headers.find("content-type"); hit != m_headers.end())
+		{
+			response->SetMimeType(hit->second.substr(0, hit->second.find_first_of(';')));
+		}
+		else
+		{
+			response->SetMimeType("application/json");
+		}
+		
 		if (!m_found)
 		{
 			response->SetStatus(404);
 		}
 		else
 		{
-			response->SetStatus(200);
+			response->SetStatus(m_statusCode);
 		}
 
 		CefResponse::HeaderMap map;
 		response->GetHeaderMap(map);
 
-		map.insert({ "cache-control", "no-cache, must-revalidate" });
-		map.insert({ "access-control-allow-origin", "*" });
-		map.insert({ "access-control-allow-methods", "POST, GET, OPTIONS" });
+		if (m_headers.size() <= 1)
+		{
+			map.insert({ "cache-control", "no-cache, must-revalidate" });
+			map.insert({ "access-control-allow-origin", "*" });
+			map.insert({ "access-control-allow-methods", "POST, GET, OPTIONS" });
+		}
+		else
+		{
+			for (auto& header : m_headers)
+			{
+				map.emplace(header.first, header.second);
+			}
+		}
 
 		response->SetHeaderMap(map);
 
@@ -190,13 +230,15 @@ public:
 	}
 
 private:
-	uint32_t m_cursor;
+	uint32_t m_cursor = 0;
 
 public:
 	virtual bool ReadResponse(void* data_out, int bytes_to_read, int& bytes_read, CefRefPtr<CefCallback> callback)
 	{
 		if (m_found)
 		{
+			std::unique_lock _(m_mutex);
+
 			int toRead = std::min((unsigned int)m_result.size() - m_cursor, (unsigned int)bytes_to_read);
 
 			memcpy(data_out, &m_result.c_str()[m_cursor], toRead);

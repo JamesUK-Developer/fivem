@@ -114,6 +114,38 @@ namespace nui
 		CRGBA color;
 	};
 
+	///
+	// Represents the state of a setting.
+	///
+	/*--cef()--*/
+	typedef enum
+	{
+		///
+		// No permission
+		///
+		NUI_MEDIA_PERMISSION_NONE = 0,
+
+		///
+		// Audio capture permission
+		///
+		NUI_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE = 1 << 0,
+
+		///
+		// Video capture permission
+		///
+		NUI_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE = 1 << 1,
+
+		///
+		// Desktop audio capture permission
+		///
+		NUI_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE = 1 << 2,
+
+		///
+		// Desktop video capture permission
+		///
+		NUI_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE = 1 << 3,
+	} media_access_permission_types_t;
+
 	class OVERLAY_DECL GameInterface
 	{
 	public:
@@ -148,6 +180,11 @@ namespace nui
 
 		virtual fwRefContainer<GITexture> CreateTextureFromD3D11Texture(ID3D11Texture2D* texture) = 0;
 
+		virtual bool RequestMediaAccess(const std::string& frameOrigin, const std::string& url, int permissions, const std::function<void(bool /* success */, int /* allowed mask */)>& onComplete)
+		{
+			return false;
+		}
+
 		fwEvent<HWND, UINT, WPARAM, LPARAM, bool&, LRESULT&> OnWndProc;
 
 		fwEvent<std::vector<InputTarget*>&> QueryInputTarget;
@@ -159,6 +196,8 @@ namespace nui
 		fwEvent<> OnInitRenderer;
 
 		fwEvent<> OnRender;
+		
+		fwEvent<bool&> QueryShouldMute;
 	};
 
 	void OVERLAY_DECL Initialize(nui::GameInterface* gi);
@@ -358,7 +397,7 @@ namespace nui
 
 	OVERLAY_DECL void SetAudioSink(IAudioSink* sinkRef);
 
-	using TResourceLookupFn = std::function<std::string(const std::string&)>;
+	using TResourceLookupFn = std::function<std::string(const std::string&, const std::string&)>;
 
 	OVERLAY_DECL void SetResourceLookupFunction(const TResourceLookupFn& fn);
 }

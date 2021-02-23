@@ -46,6 +46,8 @@ void SimpleApp::OnBeforeCommandLineProcessing(const CefString& process_type, Cef
 	command_line->AppendSwitch("disable-pdf-extension");
 	command_line->AppendSwitch("disable-gpu");
 	command_line->AppendSwitch("ignore-certificate-errors");
+	command_line->AppendSwitch("disable-site-isolation-trials");
+	command_line->AppendSwitchWithValue("disable-blink-features", "AutomationControlled");
 }
 
 namespace {
@@ -131,6 +133,8 @@ public:
 	virtual void OnBeforeClose(CefRefPtr<CefBrowser> browser) OVERRIDE;
 
 	// CefLoadHandler methods:
+	virtual void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transition_type) OVERRIDE;
+
 	virtual void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) OVERRIDE;
 
 	virtual void OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -288,6 +292,23 @@ void SimpleHandler::CloseAllBrowsers(bool force_close) {
 
 auto SimpleHandler::OnBeforeResourceLoad(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, CefRefPtr<CefRequestCallback> callback) -> ReturnValue
 {
+	CefRequest::HeaderMap hm;
+	request->GetHeaderMap(hm);
+
+	for (auto it = hm.begin(); it != hm.end(); )
+	{
+		if (it->first.ToString().find("sec-") == 0 || it->first.ToString().find("Sec-") == 0)
+		{
+			it = hm.erase(it);
+		}
+		else
+		{
+			it++;
+		}
+	}
+
+	request->SetHeaderMap(hm);
+
 	return RV_CONTINUE;
 }
 
@@ -386,7 +407,8 @@ function RGSC_GET_TITLE_ID()
 function RGSC_GET_VERSION_INFO()
 {
 	return JSON.stringify({
-		Version: 'ROS.. in browser!'
+		Version: '2.0.3.7',
+		TitleVersion: ''
 	});
 }
 
@@ -497,6 +519,10 @@ style.type = 'text/css';
 style.appendChild(document.createTextNode(css));
 )";
 
+void SimpleHandler::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transition_type)
+{
+}
+
 void SimpleHandler::OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode)
 {
 	if (frame->GetURL().ToString().find("/launcher") != std::string::npos)
@@ -533,6 +559,7 @@ void RunLegitimacyNui()
 	CefString(&settings.resources_dir_path).FromWString(resPath);
 	CefString(&settings.locales_dir_path).FromWString(resPath);
 	CefString(&settings.cache_path).FromWString(cachePath);
+	CefString(&settings.user_agent).FromWString(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.75 RockstarGames/2.0.7.5/1.0.33.319/launcher/PC Safari/537.36");
 
 	// SimpleApp implements application-level callbacks for the browser process.
 	// It will create the first browser instance in OnContextInitialized() after

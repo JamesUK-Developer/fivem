@@ -60,6 +60,9 @@ void MumbleClient::Initialize()
 
 			m_tcp = m_loop->Get()->resource<uvw::TCPHandle>();
 
+			// this is real-time audio, we don't want nagling
+			m_tcp->noDelay(true);
+
 			m_tcp->on<uvw::ConnectEvent>([this](const uvw::ConnectEvent& ev, uvw::TCPHandle& tcp)
 			{
 				m_handler.Reset();
@@ -129,26 +132,36 @@ void MumbleClient::Initialize()
 				}
 			});
 
-			if (!m_udp)
+			// if reconnecting, close the existing UDP handle so that servers that try to match source IP/port pairs won't be unhappy
+			if (m_udp)
 			{
-				m_udp = m_loop->Get()->resource<uvw::UDPHandle>();
+				auto udp = std::move(m_udp);
 
-				m_udp->on<uvw::UDPDataEvent>([this](const uvw::UDPDataEvent& ev, uvw::UDPHandle& udp)
+				udp->once<uvw::CloseEvent>([udp](const uvw::CloseEvent& ev, uvw::UDPHandle& self)
 				{
-					std::unique_lock<std::recursive_mutex> lock(m_clientMutex);
-
-					try
-					{
-						HandleUDP(reinterpret_cast<const uint8_t*>(ev.data.get()), ev.length);
-					}
-					catch (std::exception& e)
-					{
-						trace("Mumble exception: %s\n", e.what());
-					}
+					(void)udp;
 				});
 
-				m_udp->recv();
+				udp->close();
 			}
+
+			m_udp = m_loop->Get()->resource<uvw::UDPHandle>();
+
+			m_udp->on<uvw::UDPDataEvent>([this](const uvw::UDPDataEvent& ev, uvw::UDPHandle& udp)
+			{
+				std::unique_lock<std::recursive_mutex> lock(m_clientMutex);
+
+				try
+				{
+					HandleUDP(reinterpret_cast<const uint8_t*>(ev.data.get()), ev.length);
+				}
+				catch (std::exception& e)
+				{
+					trace("Mumble exception: %s\n", e.what());
+				}
+			});
+
+			m_udp->recv();
 
 			const auto& address = m_connectionInfo.address;
 			m_tcp->connect(*address.GetSocketAddress());
@@ -170,6 +183,8 @@ void MumbleClient::Initialize()
 					std::wstring wname = ToWide(m_curManualChannel);
 					m_lastManualChannel = m_curManualChannel;
 
+					bool existed = false;
+
 					for (const auto& channel : m_state.GetChannels())
 					{
 						if (channel.second.GetName() == wname)
@@ -180,11 +195,14 @@ void MumbleClient::Initialize()
 							state.set_channel_id(channel.first);
 
 							Send(MumbleMessageType::UserState, state);
-							return;
+							existed = true;
+
+							break;
 						}
 					}
 
 					// it does not, create the channel (server will verify name matches)
+					if (!existed)
 					{
 						MumbleProto::ChannelState chan;
 						chan.set_parent(0);
@@ -192,6 +210,75 @@ void MumbleClient::Initialize()
 						chan.set_temporary(true);
 
 						Send(MumbleMessageType::ChannelState, chan);
+					}
+				}
+
+				{
+					std::vector<std::string> removeChannelListens;
+					std::vector<std::string> addChannelListens;
+
+					std::vector<int> removeChannelListenIds;
+					std::vector<int> addChannelListenIds;
+
+					std::set_difference(m_lastChannelListens.begin(), m_lastChannelListens.end(), m_curChannelListens.begin(), m_curChannelListens.end(), std::back_inserter(removeChannelListens));
+					std::set_difference(m_curChannelListens.begin(), m_curChannelListens.end(), m_lastChannelListens.begin(), m_lastChannelListens.end(), std::back_inserter(addChannelListens));
+
+					auto findCh = [&](const std::string& ch)
+					{
+						std::wstring wname = ToWide(ch);
+
+						for (const auto& channel : m_state.GetChannels())
+						{
+							if (channel.second.GetName() == wname)
+							{
+								return channel.first;
+							}
+						}
+
+						return uint32_t(-1);
+					};
+
+					for (const auto& remove : removeChannelListens)
+					{
+						auto ch = findCh(remove);
+
+						if (ch != -1)
+						{
+							removeChannelListenIds.push_back(ch);
+						}
+
+						// we can remove this here, as it doesn't exist anymore: we don't listen to it either then
+						m_lastChannelListens.erase(remove);
+					}
+
+					for (const auto& add : addChannelListens)
+					{
+						auto ch = findCh(add);
+
+						if (ch != -1)
+						{
+							addChannelListenIds.push_back(ch);
+							m_lastChannelListens.insert(add);
+						}
+					}
+
+					if (!addChannelListenIds.empty() || !removeChannelListenIds.empty())
+					{
+						// send updated listens
+						MumbleProto::UserState state;
+						state.set_session(m_state.GetSession());
+
+						for (auto id : addChannelListenIds)
+						{
+							state.add_listening_channel_add(id);
+						}
+
+						for (auto id : removeChannelListenIds)
+						{
+							state.add_listening_channel_remove(id);
+						}
+
+						Send(MumbleMessageType::UserState, state);
 					}
 				}
 
@@ -306,7 +393,14 @@ concurrency::task<MumbleConnectionInfo*> MumbleClient::ConnectAsync(const net::P
 	m_connectionInfo.address = address;
 	m_connectionInfo.username = userName;
 
-	m_curManualChannel = "Root";
+	if (m_curManualChannel.empty())
+	{
+		m_curManualChannel = "Root";
+	}
+	else
+	{
+		m_lastManualChannel = "Root";
+	}
 
 	m_tcpPingAverage = 0.0f;
 	m_tcpPingVariance = 0.0f;
@@ -337,17 +431,40 @@ concurrency::task<void> MumbleClient::DisconnectAsync()
 		m_tlsClient->close();
 	}
 
-	m_loop->EnqueueCallback([this]()
+	auto tcs = concurrency::task_completion_event<void>{};
+
+	m_loop->EnqueueCallback([this, tcs]()
 	{
 		if (m_idleTimer)
 		{
 			m_idleTimer->stop();
 		}
+
+		if (m_connectTimer)
+		{
+			m_connectTimer->stop();
+		}
+
+		if (m_tcp)
+		{
+			m_tcp->once<uvw::CloseEvent>([this, tcs](const uvw::CloseEvent& e, uvw::TCPHandle& h)
+			{
+				tcs.set();
+				m_tcp = {};
+			});
+
+			m_tcp->shutdown();
+			m_tcp->close();
+		}
+		else
+		{
+			tcs.set();
+		}
 	});
 
 	m_connectionInfo = {};
 
-	return concurrency::task_from_result();
+	return concurrency::task<void>(tcs);
 }
 
 void MumbleClient::SetActivationMode(MumbleActivationMode mode)
@@ -413,9 +530,31 @@ void MumbleClient::SetChannel(const std::string& channelName)
 	m_curManualChannel = channelName;
 }
 
+void MumbleClient::AddListenChannel(const std::string& channelName)
+{
+	std::lock_guard<std::recursive_mutex> l(m_clientMutex);
+	m_curChannelListens.insert(channelName);
+}
+
+void MumbleClient::RemoveListenChannel(const std::string& channelName)
+{
+	std::lock_guard<std::recursive_mutex> l(m_clientMutex);
+	m_curChannelListens.erase(channelName);
+}
+
 void MumbleClient::SetAudioDistance(float distance)
 {
 	m_audioInput.SetDistance(distance);
+	m_audioOutput.SetDistance(distance);
+}
+
+void MumbleClient::SetAudioInputDistance(float distance)
+{
+	m_audioInput.SetDistance(distance);
+}
+
+void MumbleClient::SetAudioOutputDistance(float distance)
+{
 	m_audioOutput.SetDistance(distance);
 }
 
@@ -476,24 +615,31 @@ std::wstring MumbleClient::GetPlayerNameFromServerId(uint32_t serverId)
 	return retName;
 }
 
-uint32_t MumbleClient::GetVoiceChannelFromServerId(uint32_t serverId)
+std::string MumbleClient::GetVoiceChannelFromServerId(uint32_t serverId)
 {
-	uint32_t retId = -1;
+	std::string retString = "";
 
-	m_state.ForAllUsers([serverId, &retId](const std::shared_ptr<MumbleUser>& user)
+	m_state.ForAllUsers([this, serverId, &retString](const std::shared_ptr<MumbleUser>& user)
 	{
-		if (retId != -1)
+		if (!retString.empty())
 		{
 			return;
 		}
 
 		if (user && user->GetServerId() == serverId)
 		{
-			retId = user->GetChannelId();
+			const auto& channels = m_state.GetChannels();
+			auto channelId = user->GetChannelId();
+			auto chit = channels.find(channelId);
+
+			if (chit != channels.end())
+			{
+				retString = ToNarrow(chit->second.GetName());
+			}
 		}
 	});
 
-	return retId;
+	return retString;
 }
 
 void MumbleClient::GetTalkers(std::vector<std::string>* referenceIds)

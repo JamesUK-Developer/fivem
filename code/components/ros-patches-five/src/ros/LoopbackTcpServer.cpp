@@ -681,25 +681,32 @@ private:
 		for (const auto& rootTree : { L"", L"bin" })
 		{
 			fs::path plugins_path(MakeRelativeCitPath(rootTree));
-			fs::directory_iterator it(plugins_path), end;
 
-			while (it != end)
+			try
 			{
-				// gta-net-five hooks select() after us, so our hook will think any caller is Cfx
-				if (it->path().extension() == ".dll" && it->path().filename() != "gta-net-five.dll" && it->path().filename() != "gta-net-rdr3.dll")
+				fs::directory_iterator it(plugins_path), end;
+
+				while (it != end)
 				{
-					HMODULE hMod = GetModuleHandle(it->path().c_str());
-
-					if (hMod)
+					// gta-net-five hooks select() after us, so our hook will think any caller is Cfx
+					if (it->path().extension() == ".dll" && it->path().filename() != "gta-net-five.dll" && it->path().filename() != "gta-net-rdr3.dll")
 					{
-						MODULEINFO mi;
-						GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi));
+						HMODULE hMod = GetModuleHandle(it->path().c_str());
 
-						set.insert({ (uintptr_t)hMod, (uintptr_t)hMod + mi.SizeOfImage });
+						if (hMod)
+						{
+							MODULEINFO mi;
+							GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi));
+
+							set.insert({ (uintptr_t)hMod, (uintptr_t)hMod + mi.SizeOfImage });
+						}
 					}
-				}
 
-				it++;
+					it++;
+				}
+			}
+			catch (std::exception& e)
+			{
 			}
 		}
 
@@ -841,7 +848,21 @@ static int __stdcall EP_WSARecv(SOCKET s, LPWSABUF buffers, DWORD bufferCount, L
 	{
 		// we don't handle any other case yet
 		assert(bufferCount == 1);
-		assert(overlapped);
+		
+		if (!overlapped)
+		{
+			assert(bytesRead);
+
+			int dummy;
+			g_manager->Recv(s, buffers[0].buf, buffers[0].len, 0, &dummy);
+
+			if (dummy >= 0)
+			{
+				*bytesRead = dummy;
+			}
+
+			return (dummy >= 0) ? 0 : SOCKET_ERROR;
+		}
 
 		// check if there's any data to initially read
 		if (g_manager->HasDataInSocket(s))
@@ -1277,7 +1298,7 @@ static BOOL __stdcall EP_CreateProcessW(const wchar_t* applicationName, wchar_t*
 
 			BuildEnvironmentBlock(environmentMap, newEnvironment);
 
-			auto fxApplicationName = MakeCfxSubProcess(L"ROSService", L"game");
+			auto fxApplicationName = MakeCfxSubProcess(L"ROSService", fmt::sprintf(L"game_%d", xbr::GetGameBuild()));
 
 			// set the command line
 			const wchar_t* newCommandLine = va(L"\"%s\" ros:service", fxApplicationName, commandLine);
@@ -1411,7 +1432,21 @@ static void SetLauncherWaitCB(HANDLE hEvent, HANDLE hProcess, BOOL doBreak)
 					{
 						SetCanSafelySkipLauncher(false);
 
-						FatalError("Timed out while waiting for ROS/MTL to clear launch. Please check your system for third-party software (antivirus, etc.) that might be interfering with ROS.\nIf asking for support, please attach the log file from the 'Save information' button.");
+						auto backOffSuffix = fmt::sprintf(L"%d", GetTickCount64());
+						
+						auto backOffFile = [backOffSuffix](const std::wstring& fileName)
+						{
+							MoveFileW(MakeRelativeCitPath(fileName).c_str(), MakeRelativeCitPath(fileName + L".old" + backOffSuffix).c_str());
+						};
+
+						backOffFile(L"cache\\game\\ros_documents");
+						backOffFile(L"cache\\game\\ros_launcher_appdata3");
+						backOffFile(L"cache\\game\\ros_launcher_data3");
+						backOffFile(L"cache\\game\\ros_launcher_documents2");
+						backOffFile(L"cache\\game\\ros_launcher_game2");
+						backOffFile(L"cache\\game\\ros_profiles");
+
+						FatalError("Timed out while waiting for ROS/MTL to clear launch. Please check your system for third-party software (antivirus, etc.) that might be interfering with ROS.\nIf asking for support, please save and upload the log file from the 'Save information' button.\n\nAgain, please save and UPLOAD the log file from the 'Save information' button to https://forum.cfx.re/t/2009848 or anywhere you're asking for help!");
 					}
 
 					trace("^3ROS/MTL still hasn't cleared launch (waited %d seconds) - if this ends up timing out, please solve this!\n", waitedFor);
@@ -1482,14 +1517,29 @@ void RunLauncher(const wchar_t* toolName, bool instantWait)
 	//SetEnvironmentVariable(L"CitizenFX_ToolMode", L"1");
 
 	// create a new application name
-	auto fxApplicationName = MakeCfxSubProcess(L"ROSLauncher", L"game");
+	auto fxApplicationName = MakeCfxSubProcess(L"ROSLauncher", fmt::sprintf(L"game_%d", xbr::GetGameBuild()));
 
 	// set the command line
 	//const wchar_t* newCommandLine = va(L"\"%s\" %s --parent_pid=%d \"%s\"", fxApplicationName, toolName, GetCurrentProcessId(), MakeRelativeGamePath(L"GTAVLauncher.exe").c_str());
-	const wchar_t* newCommandLine = va(L"\"%s\" %s --parent_pid=%d \"%s\"", fxApplicationName, toolName, GetCurrentProcessId(), L"C:\\program files\\rockstar games\\launcher\\launcher.exe");
+	const wchar_t* newCommandLine = va(L"\"%s\" %s --parent_pid=%d \"%s\" -noRecogniser", fxApplicationName, toolName, GetCurrentProcessId(), L"C:\\program files\\rockstar games\\launcher\\launcher.exe");
 
 	// create a waiting event
-	HANDLE hEvent = CreateEvent(nullptr, TRUE, FALSE, va(L"CitizenFX_GTA5_ClearedForLaunch%s", IsCL2() ? L"CL2" : L""));
+	auto eventName = L"";
+
+	if (wcsstr(toolName, L"steam"))
+	{
+		eventName = L"_Steam";
+	}
+	else if (wcsstr(toolName, L"epic"))
+	{
+		eventName = L"_Epic";
+	}
+	else if (IsCL2())
+	{
+		eventName = L"CL2";
+	}
+
+	HANDLE hEvent = CreateEvent(nullptr, TRUE, FALSE, va(L"CitizenFX_GTA5_ClearedForLaunch%s", eventName));
 
 	// and go create the new fake process
 	PROCESS_INFORMATION pi;
@@ -1705,7 +1755,7 @@ void OnPreInitHook()
 	DO_HOOK(L"ws2_32.dll", "GetAddrInfoExW", EP_GetAddrInfoExW, g_oldGetAddrInfoExW);
 //	DO_HOOK(L"ws2_32.dll", "FreeAddrInfoW", EP_FreeAddrInfoW, g_oldFreeAddrInfoW); // these three are hook-checked
 
-	if (CfxIsWine())
+	if (CfxIsWine() || GetProcAddress(GetModuleHandle(L"kernel32.dll"), "EnterUmsSchedulingMode") == nullptr) // ARM64X 21277 doesn't expose EnterUmsSchedulingMode
 	{
 		DO_HOOK(L"ws2_32.dll", "getaddrinfo", EP_GetAddrInfo, g_oldGetAddrInfo); // enabled because wine, probably going to fail
 	}

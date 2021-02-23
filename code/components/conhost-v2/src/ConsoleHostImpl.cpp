@@ -10,6 +10,8 @@
 #include "ConsoleHost.h"
 #include "ConsoleHostImpl.h"
 
+#include <d3d11.h>
+
 #include <mutex>
 #include <queue>
 
@@ -29,6 +31,9 @@
 
 #include <imgui.h>
 
+#include "backends/imgui_impl_dx11.h"
+#include "backends/imgui_impl_win32.h"
+
 #include <ShlObj.h>
 
 static bool g_conHostInitialized = false;
@@ -40,7 +45,7 @@ int g_bufferHeight;
 static uint32_t g_pointSamplerState;
 static rage::grcTexture* g_fontTexture;
 
-static void RenderDrawListInternal(ImDrawList* drawList)
+static void RenderDrawListInternal(ImDrawList* drawList, ImDrawData* refData)
 {
 	auto oldRasterizerState = GetRasterizerState();
 	SetRasterizerState(GetStockStateIdentifier(RasterizerStateNoCulling));
@@ -61,7 +66,7 @@ static void RenderDrawListInternal(ImDrawList* drawList)
 		}
 		else
 		{
-			SetTextureGtaIm((rage::grcTexture*)cmd.TextureId);
+			SetTextureGtaIm(*(rage::grcTexture**)cmd.TextureId);
 
 			PushDrawBlitImShader();
 
@@ -77,7 +82,7 @@ static void RenderDrawListInternal(ImDrawList* drawList)
 					auto& vertex = drawList->VtxBuffer.Data[drawList->IdxBuffer.Data[i + idxOff]];
 					auto color = vertex.col;
 
-					rage::grcVertex(vertex.pos.x, vertex.pos.y, 0.0f, 0.0f, 0.0f, -1.0f, color, vertex.uv.x, vertex.uv.y);
+					rage::grcVertex(vertex.pos.x - refData->DisplayPos.x, vertex.pos.y - refData->DisplayPos.y, 0.0f, 0.0f, 0.0f, -1.0f, color, vertex.uv.x, vertex.uv.y);
 				}
 
 				idxOff += c;
@@ -85,14 +90,14 @@ static void RenderDrawListInternal(ImDrawList* drawList)
 #if defined(GTA_FIVE)
 				// set scissor rects here, as they might be overwritten by a matrix push
 				D3D11_RECT scissorRect;
-				scissorRect.left = cmd.ClipRect.x;
-				scissorRect.top = cmd.ClipRect.y;
-				scissorRect.right = cmd.ClipRect.z;
-				scissorRect.bottom = cmd.ClipRect.w;
+				scissorRect.left = cmd.ClipRect.x - refData->DisplayPos.x;
+				scissorRect.top = cmd.ClipRect.y - refData->DisplayPos.y;
+				scissorRect.right = cmd.ClipRect.z - refData->DisplayPos.x;
+				scissorRect.bottom = cmd.ClipRect.w - refData->DisplayPos.y;
 
 				GetD3D11DeviceContext()->RSSetScissorRects(1, &scissorRect);
 #else
-				SetScissorRect(cmd.ClipRect.x, cmd.ClipRect.y, cmd.ClipRect.z, cmd.ClipRect.w);
+				SetScissorRect(cmd.ClipRect.x - refData->DisplayPos.x, cmd.ClipRect.y - refData->DisplayPos.y, cmd.ClipRect.z - refData->DisplayPos.x, cmd.ClipRect.w - refData->DisplayPos.y);
 #endif
 
 				rage::grcEnd();
@@ -139,17 +144,18 @@ static void RenderDrawLists(ImDrawData* drawData)
 
 		if (IsOnRenderThread())
 		{
-			RenderDrawListInternal(grDrawList);
+			RenderDrawListInternal(grDrawList, drawData);
 		}
 		else
 		{
 			uintptr_t argRef = (uintptr_t)grDrawList;
+			uintptr_t argRefB = (uintptr_t)drawData;
 
 			EnqueueGenericDrawCommand([](uintptr_t a, uintptr_t b)
 			{
-				RenderDrawListInternal((ImDrawList*)a);
+				RenderDrawListInternal((ImDrawList*)a, (ImDrawData*)b);
 			},
-			&argRef, &argRef);
+			&argRef, &argRefB);
 		}
 	}
 }
@@ -173,7 +179,13 @@ static void CreateFontTexture()
 	rage::grcTexture* texture = rage::grcTextureFactory::getInstance()->createImage(&reference, nullptr);
 	g_fontTexture = texture;
 
-	io.Fonts->TexID = (void*)g_fontTexture;
+	if (!io.Fonts->TexID)
+	{
+		void** texId = new void*[2];
+		io.Fonts->TexID = (ImTextureID)texId;
+	}
+
+	((void**)io.Fonts->TexID)[0] = (void*)g_fontTexture;
 }
 #else
 DLL_EXPORT fwEvent<ImDrawData*> OnRenderImDrawData;
@@ -190,8 +202,10 @@ static void RenderDrawLists(ImDrawData* drawData)
 #endif
 
 void DrawConsole();
+void DrawDevGui();
 
 static std::mutex g_conHostMutex;
+ImFont* consoleFontSmall;
 
 void DrawMiniConsole();
 
@@ -237,10 +251,38 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 	io.KeyAlt = (GetKeyState(VK_MENU) & 0x8000) != 0;
 	io.KeySuper = false;
 
+	if (ImGui::GetPlatformIO().Viewports.Size > 1)
+	{
+		MSG msg = { 0 };
+
+		while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+		{
+			TranslateMessage(&msg);
+			DispatchMessageW(&msg);
+		}
+	}
+
+	ImGui_ImplDX11_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+
 	ImGui::NewFrame();
+
+	bool wasSmallFont = false;
+
+	{
+		int x, y;
+		GetGameResolution(x, y);
+
+		if (x <= 1920 && y <= 1080)
+		{
+			ImGui::PushFont(consoleFontSmall);
+			wasSmallFont = true;
+		}
+	}
 
 	if (g_consoleFlag)
 	{
+		DrawDevGui();
 		DrawConsole();
 	}
 
@@ -248,7 +290,16 @@ DLL_EXPORT void OnConsoleFrameDraw(int width, int height)
 
 	ConHost::OnDrawGui();
 
+	if (wasSmallFont)
+	{
+		ImGui::PopFont();
+	}
+
 	ImGui::Render();
+	RenderDrawLists(ImGui::GetDrawData());
+
+    ImGui::UpdatePlatformWindows();
+	ImGui::RenderPlatformWindowsDefault();
 
 	lastDrawTime = timeGetTime();
 
@@ -267,8 +318,9 @@ static void OnConsoleWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, 
 	}
 
 	std::unique_lock<std::mutex> g_conHostMutex;
-
 	ImGuiIO& io = ImGui::GetIO();
+
+#if 0
 	switch (msg)
 	{
 		case WM_LBUTTONDOWN:
@@ -324,6 +376,15 @@ static void OnConsoleWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, 
 			pass = false;
 			break;
 	}
+#endif
+
+	ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	
+	if (msg == WM_INPUT || (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+		(msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || msg == WM_CHAR)
+	{
+		pass = false;
+	}
 
 	if (!pass)
 	{
@@ -339,10 +400,13 @@ DLL_EXPORT void RunConsoleWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 	OnConsoleWndProc(hWnd, msg, wParam, lParam, pass, result);
 }
 
-ImFont* consoleFontSmall;
 ImFont* consoleFontTiny;
 
-static InitFunction initFunction([]()
+#pragma comment(lib, "d3d11.lib")
+
+void ImGui_ImplWin32_InitPlatformInterface();
+
+static HookFunction initFunction([]()
 {
 	auto cxt = ImGui::CreateContext();
 	ImGui::SetCurrentContext(cxt);
@@ -371,6 +435,54 @@ static InitFunction initFunction([]()
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	io.ConfigDockingWithShift = true;
 	io.ConfigWindowsResizeFromEdges = true;
+
+	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+	io.BackendFlags |= ImGuiBackendFlags_HasSetMousePos; // We can honor io.WantSetMousePos requests (optional, rarely used)
+	io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports; // We can create multi-viewports on the Platform side (optional)
+	io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport; // We can set io.MouseHoveredViewport correctly (optional, not easy)
+
+	io.BackendFlags |= ImGuiBackendFlags_RendererHasViewports;
+
+	ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+	main_viewport->PlatformHandle = main_viewport->PlatformHandleRaw = nullptr;
+
+	ID3D11Device* device;
+	ID3D11DeviceContext* immcon;
+
+	// use the system function as many proxy DLLs don't like multiple devices being made in the game process
+	// and they're 'closed source' and 'undocumented' so we can't reimplement the same functionality natively
+
+	// also, create device here and not after the game's or nui:core hacks will mismatch with proxy DLLs
+	wchar_t systemD3D11Name[512];
+	GetSystemDirectoryW(systemD3D11Name, std::size(systemD3D11Name));
+	wcscat(systemD3D11Name, L"\\d3d11.dll");
+
+	auto systemD3D11 = LoadLibraryW(systemD3D11Name);
+	assert(systemD3D11);
+
+	auto systemD3D11CreateDevice = (decltype(&D3D11CreateDevice))GetProcAddress(systemD3D11, "D3D11CreateDevice");
+
+	systemD3D11CreateDevice(NULL,
+	D3D_DRIVER_TYPE_HARDWARE,
+	nullptr,
+	0,
+	nullptr,
+	0,
+	D3D11_SDK_VERSION,
+	&device,
+	nullptr,
+	&immcon);
+
+	OnGrcCreateDevice.Connect([io, device, immcon]()
+	{
+		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+		{
+			ImGui_ImplWin32_InitPlatformInterface();
+		}
+
+		ImGui_ImplDX11_Init(device, immcon);
+	});
 
 	io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
 
@@ -401,7 +513,6 @@ static InitFunction initFunction([]()
 	})();
 
 	io.IniFilename = const_cast<char*>(imguiIni.c_str());
-	io.RenderDrawListsFn = RenderDrawLists; // Alternatively you can set this to NULL and call ImGui::GetDrawData() after ImGui::Render() to get the same ImDrawData pointer.
 	//io.ImeWindowHandle = g_hWnd;
 
 	ImGuiStyle& style = ImGui::GetStyle();
@@ -586,3 +697,33 @@ void ConHost::Print(const std::string& channel, const std::string& message)
 fwEvent<const char*, const char*> ConHost::OnInvokeNative;
 fwEvent<> ConHost::OnDrawGui;
 fwEvent<bool*> ConHost::OnShouldDrawGui;
+
+DLL_EXPORT ImFont* GetConsoleFontSmall()
+{
+	return consoleFontSmall;
+}
+
+DLL_EXPORT ImFont* GetConsoleFontTiny()
+{
+	return consoleFontTiny;
+}
+
+// GTA-specific
+#include <Hooking.h>
+
+static decltype(&ReleaseCapture) g_origReleaseCapture;
+
+static void WINAPI ReleaseCaptureStub()
+{
+	if (g_consoleFlag)
+	{
+		return;
+	}
+
+	g_origReleaseCapture();
+}
+
+static HookFunction hookFunction([]()
+{
+	g_origReleaseCapture = (decltype(g_origReleaseCapture))hook::iat("user32.dll", ReleaseCaptureStub, "ReleaseCapture");
+});

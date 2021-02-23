@@ -8,6 +8,7 @@
 #include <ScriptEngine.h>
 
 #include <ScriptSerialization.h>
+#include <MakeClientFunction.h>
 #include <MakePlayerEntityFunction.h>
 
 namespace fx
@@ -204,26 +205,47 @@ static InitFunction initFunction([]()
 		else
 		{
 			auto en = entity->syncTree->GetEntityOrientation();
+			auto on = entity->syncTree->GetObjectOrientation();
 
-			if (en)
+			if (en || on)
 			{
-#if 0
-				resultVec.x = en->rotX * 180.0 / pi;
-				resultVec.y = en->rotY * 180.0 / pi;
-				resultVec.z = en->rotZ * 180.0 / pi;
-#else
-				float qx, qy, qz, qw;
-				en->quat.Save(qx, qy, qz, qw);
+				bool highRes = false;
+				fx::sync::compressed_quaternion<11> quat;
+				float rotX, rotY, rotZ;
 
-				auto m4 = glm::toMat4(glm::quat{qw, qx, qy, qz});
+				if (en)
+				{
+					quat = en->quat;
+				}
+				else if (on)
+				{
+					highRes = on->highRes;
+					quat = on->quat;
+					rotX = on->rotX;
+					rotY = on->rotY;
+					rotZ = on->rotZ;
+				}
 
-				// common GTA rotation (2) is ZXY
-				glm::extractEulerAngleZXY(m4, resultVec.z, resultVec.x, resultVec.y);
+				if (highRes)
+				{
+					resultVec.x = rotX * 180.0 / pi;
+					resultVec.y = rotY * 180.0 / pi;
+					resultVec.z = rotZ * 180.0 / pi;
+				}
+				else
+				{
+					float qx, qy, qz, qw;
+					quat.Save(qx, qy, qz, qw);
 
-				resultVec.x = glm::degrees(resultVec.x);
-				resultVec.y = glm::degrees(resultVec.y);
-				resultVec.z = glm::degrees(resultVec.z);
-#endif
+					auto m4 = glm::toMat4(glm::quat{ qw, qx, qy, qz });
+
+					// common GTA rotation (2) is ZXY
+					glm::extractEulerAngleZXY(m4, resultVec.z, resultVec.x, resultVec.y);
+
+					resultVec.x = glm::degrees(resultVec.x);
+					resultVec.y = glm::degrees(resultVec.y);
+					resultVec.z = glm::degrees(resultVec.z);
+				}
 			}
 		}
 
@@ -344,6 +366,50 @@ static InitFunction initFunction([]()
 			return 0;
 		}
 	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_ROUTING_BUCKET_POPULATION_ENABLED", [](fx::ScriptContext& context)
+	{
+		int bucket = context.GetArgument<int>(0);
+		bool enabled = context.GetArgument<bool>(1);
+
+		// get the current resource manager
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		// get the owning server instance
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		// get the server's game state
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+		gameState->SetPopulationDisabled(bucket, !enabled);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_ROUTING_BUCKET_ENTITY_LOCKDOWN_MODE", [](fx::ScriptContext& context)
+	{
+		int bucket = context.GetArgument<int>(0);
+		std::string_view sv = context.CheckArgument<const char*>(1);
+
+		// get the current resource manager
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		// get the owning server instance
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		// get the server's game state
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+		if (sv == "strict")
+		{
+			gameState->SetEntityLockdownMode(bucket, fx::EntityLockdownMode::Strict);
+		}
+		else if (sv == "relaxed")
+		{
+			gameState->SetEntityLockdownMode(bucket, fx::EntityLockdownMode::Relaxed);
+		}
+		else if (sv == "inactive")
+		{
+			gameState->SetEntityLockdownMode(bucket, fx::EntityLockdownMode::Inactive);
+		}
+	});
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_SYNC_ENTITY_LOCKDOWN_MODE", [](fx::ScriptContext& context)
 	{
@@ -503,14 +569,14 @@ static InitFunction initFunction([]()
 	{
 		auto vn = entity->syncTree->GetVehicleHealth();
 
-		return vn ? vn->engineHealth : 0;
+		return vn ? float(vn->engineHealth) : 0;
 	}));
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_PETROL_TANK_HEALTH", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
 	{
 		auto vn = entity->syncTree->GetVehicleHealth();
 
-		return vn ? vn->petrolTankHealth : 0;
+		return vn ? float(vn->petrolTankHealth) : 0;
 	}));
 
 	fx::ScriptEngine::RegisterNativeHandler("IS_VEHICLE_TYRE_BURST", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
@@ -545,7 +611,7 @@ static InitFunction initFunction([]()
 	{
 		auto vn = entity->syncTree->GetVehicleHealth();
 
-		return vn ? vn->bodyHealth : 0;
+		return vn ? float(vn->bodyHealth) : 0;
 	}));
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_PED_MAX_HEALTH", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
@@ -748,7 +814,7 @@ static InitFunction initFunction([]()
 	{
 		auto vn = entity->syncTree->GetVehicleAppearance();
 
-		return vn ? vn->dirtLevel : 0;
+		return vn ? float(vn->dirtLevel) : 0;
 	}));
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_TYPE", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
@@ -1129,5 +1195,223 @@ static InitFunction initFunction([]()
 		}
 
 		return true;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_ROUTING_BUCKET", MakeClientFunction([](fx::ScriptContext& context, const fx::ClientSharedPtr& client)
+	{
+		// get the current resource manager
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		// get the owning server instance
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		// get the server's game state
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+		auto [lock, clientData] = gameState->ExternalGetClientData(client);
+		return int(clientData->routingBucket);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_PLAYER_ROUTING_BUCKET", MakeClientFunction([](fx::ScriptContext& context, const fx::ClientSharedPtr& client)
+	{
+		if (context.GetArgumentCount() > 1)
+		{
+			auto bucket = context.GetArgument<int>(1);
+
+			if (bucket >= 0)
+			{
+				// get the current resource manager
+				auto resourceManager = fx::ResourceManager::GetCurrent();
+
+				// get the owning server instance
+				auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+				// get the server's game state
+				auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+				auto [lock, clientData] = gameState->ExternalGetClientData(client);
+				gameState->ClearClientFromWorldGrid(client);
+				clientData->routingBucket = bucket;
+				
+				fx::sync::SyncEntityPtr playerEntity;
+
+				{
+					std::shared_lock _lock(clientData->playerEntityMutex);
+					playerEntity = clientData->playerEntity.lock();
+				}
+
+				if (playerEntity)
+				{
+					playerEntity->routingBucket = bucket;
+				}
+			}
+		}
+
+		return true;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_ENTITY_ROUTING_BUCKET", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		return int(entity->routingBucket);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_ENTITY_ROUTING_BUCKET", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		if (context.GetArgumentCount() > 1)
+		{
+			auto bucket = context.GetArgument<int>(1);
+
+			if (bucket >= 0)
+			{
+				entity->routingBucket = bucket;
+			}
+		}
+
+		return true;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_INVINCIBLE", MakePlayerEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto pn = entity->syncTree->GetPlayerGameState();
+
+		return pn ? pn->isInvincible : false;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_CAMERA_ROTATION", MakePlayerEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto camData = entity->syncTree->GetPlayerCamera();
+
+		scrVector resultVector = { 0 };
+
+		if (camData)
+		{
+			resultVector.x = camData->cameraX;
+			resultVector.y = 0.0f;
+			resultVector.z = camData->cameraZ;
+		}
+		else
+		{
+			resultVector.x = 0.0f;
+			resultVector.y = 0.0f;
+			resultVector.z = 0.0f;
+		}
+
+		return resultVector;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_TRAIN_CARRIAGE_ENGINE", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto train = entity->syncTree->GetTrainState();
+
+		if (!train)
+		{
+			return uint32_t(0);
+		}
+
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+		auto engine = gameState->GetEntity(0, train->engineCarriage);
+
+		return engine ? gameState->MakeScriptHandle(engine) : 0;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_TRAIN_CARRIAGE_INDEX", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto train = entity->syncTree->GetTrainState();
+
+		return train ? train->carriageIndex : -1;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_FAKE_WANTED_LEVEL", MakePlayerEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto pn = entity->syncTree->GetPlayerWantedAndLOS();
+
+		return pn ? pn->fakeWantedLevel : 0;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PLAYER_WANTED_CENTRE_POSITION", MakePlayerEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto pn = entity->syncTree->GetPlayerWantedAndLOS();
+
+		scrVector resultVector = { 0 };
+
+		if (pn)
+		{
+			resultVector.x = pn->wantedPositionX;
+			resultVector.y = pn->wantedPositionY;
+			resultVector.z = pn->wantedPositionZ;
+		}
+		else
+		{
+			resultVector.x = 0.0f;
+			resultVector.y = 0.0f;
+			resultVector.z = 0.0f;
+		}
+
+		return resultVector;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("IS_ENTITY_VISIBLE", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		bool visible = false;
+		entity->syncTree->IsEntityVisible(&visible);
+
+		return visible;
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PED_SOURCE_OF_DAMAGE", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto node = entity->syncTree->GetPedHealth();
+
+
+		// get the current resource manager
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		// get the owning server instance
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		// get the server's game state
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+		if (!node || node->sourceOfDamage == 0)
+			return (uint32_t)0;
+
+		auto returnEntity = gameState->GetEntity(0, node->sourceOfDamage);
+
+		if (!returnEntity)
+			return (uint32_t)0;
+
+		// Return the entity
+		return gameState->MakeScriptHandle(returnEntity);
+	}));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_PED_SOURCE_OF_DEATH", makeEntityFunction([](fx::ScriptContext& context, const fx::sync::SyncEntityPtr& entity)
+	{
+		auto node = entity->syncTree->GetPedHealth();
+
+
+		// get the current resource manager
+		auto resourceManager = fx::ResourceManager::GetCurrent();
+
+		// get the owning server instance
+		auto instance = resourceManager->GetComponent<fx::ServerInstanceBaseRef>()->Get();
+
+		// get the server's game state
+		auto gameState = instance->GetComponent<fx::ServerGameState>();
+
+		if (!node || node->health > 0 || node->sourceOfDamage == 0)
+			return (uint32_t)0;
+
+		auto returnEntity = gameState->GetEntity(0, node->sourceOfDamage);
+
+		if (!returnEntity)
+			return (uint32_t)0;
+
+		// Return the entity
+		return gameState->MakeScriptHandle(returnEntity);
 	}));
 });

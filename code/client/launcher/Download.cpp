@@ -7,7 +7,7 @@
 
 #include "StdInc.h"
 
-#ifdef LAUNCHER_PERSONALITY_MAIN
+#if defined(LAUNCHER_PERSONALITY_MAIN) || defined(COMPILING_GLUE)
 #include <CfxLocale.h>
 
 // the maximum number of concurrent downloads
@@ -30,9 +30,45 @@
 #include <curl/easy.h>
 #include <curl/multi.h>
 
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509.h>
+
+#include "SSLRoots.h"
+
 #include <math.h>
 #include <queue>
 #include <sstream>
+
+static CURLcode ssl_ctx_callback(CURL* curl, void* ssl_ctx, void* userptr)
+{
+	auto config = (mbedtls_ssl_config*)ssl_ctx;
+
+	mbedtls_ssl_conf_ca_chain(config,
+		(mbedtls_x509_crt*)userptr,
+		nullptr);
+
+	return CURLE_OK;
+}
+
+static CURL* curl_easy_init_cfx()
+{
+	auto curlHandle = curl_easy_init();
+
+	if (curlHandle)
+	{
+		curl_easy_setopt(curlHandle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+		curl_easy_setopt(curlHandle, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_TLSv1_2);
+
+		static mbedtls_x509_crt cacert;
+		mbedtls_x509_crt_init(&cacert);
+		mbedtls_x509_crt_parse(&cacert, sslRoots, sizeof(sslRoots));
+
+		curl_easy_setopt(curlHandle, CURLOPT_SSL_CTX_DATA, &cacert);
+		curl_easy_setopt(curlHandle, CURLOPT_SSL_CTX_FUNCTION, ssl_ctx_callback);
+	}
+
+	return curlHandle;
+}
 
 #define restrict
 #define LZMA_API_STATIC
@@ -460,6 +496,52 @@ static bool PollIPFS()
 	return true;
 }
 
+#include <shellapi.h>
+#include <shobjidl.h>
+#include <wrl.h>
+namespace WRL = Microsoft::WRL;
+
+static bool ReallyMoveFile(const std::wstring& from, const std::wstring& to)
+{
+	CoInitialize(NULL);
+
+	WRL::ComPtr<IFileOperation> ifo;
+	HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOperation, (void**)&ifo);
+
+	if (FAILED(hr))
+	{
+		return false;
+	}
+
+	ifo->SetOperationFlags(FOF_NOCONFIRMATION);
+	ifo->SetOwnerWindow(UI_GetWindowHandle());
+
+	WRL::ComPtr<IShellItem> shitem;
+	if (FAILED(SHCreateItemFromParsingName(from.c_str(), NULL, IID_IShellItem, (void**)&shitem)))
+	{
+		return false;
+	}
+
+	ifo->RenameItem(shitem.Get(), to.c_str(), NULL);
+
+	hr = ifo->PerformOperations();
+
+	if (FAILED(hr))
+	{
+		return false;
+	}
+
+	BOOL aborted = FALSE;
+	ifo->GetAnyOperationsAborted(&aborted);
+
+	if (aborted)
+	{
+		return false;
+	}
+
+	return true;
+}
+
 bool DL_ProcessDownload()
 {
 	if (!dls.currentDownloads.size())
@@ -541,9 +623,18 @@ bool DL_ProcessDownload()
 		{
 			if (GetLastError() != ERROR_FILE_NOT_FOUND)
 			{
-				MessageBoxA(NULL, va("Deleting old %s failed (err = %d) - make sure you don't have any existing FiveM processes running", download->url, GetLastError()), "Error", MB_OK | MB_ICONSTOP);
+				auto toDeleteName = MakeRelativeCitPath(fmt::sprintf(".updater-remove-%08x-%d", HashString(download->tmpPath.c_str()), GetTickCount64()));
 
-				return false;
+				if (MoveFile(opathWide.c_str(), toDeleteName.c_str()) == 0)
+				{
+					// let's try asking the shell
+					if (!ReallyMoveFile(opathWide, toDeleteName))
+					{
+						//MessageBoxA(NULL, va("Deleting old %s failed (err = %d) - make sure you don't have any existing FiveM processes running", download->url, GetLastError()), "Error", MB_OK | MB_ICONSTOP);
+
+						return false;
+					}
+				}
 			}
 		}
 
@@ -634,7 +725,7 @@ bool DL_ProcessDownload()
 			curl_slist* headers = nullptr;
 			headers = curl_slist_append(headers, va("X-Cfx-Client: 1"));
 
-			auto curlHandle = curl_easy_init();
+			auto curlHandle = curl_easy_init_cfx();
 			download->curlHandles[0] = curlHandle;
 
 			curl_easy_setopt(curlHandle, CURLOPT_URL, download->url);
@@ -645,7 +736,6 @@ bool DL_ProcessDownload()
 			curl_easy_setopt(curlHandle, CURLOPT_FAILONERROR, true);
 			curl_easy_setopt(curlHandle, CURLOPT_HTTPHEADER, headers);
 			curl_easy_setopt(curlHandle, CURLOPT_FOLLOWLOCATION, true);
-			curl_easy_setopt(curlHandle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
 			if (getenv("CFX_CURL_DEBUG"))
 			{
@@ -843,11 +933,17 @@ const char* DL_RequestURLError()
 	return g_curlError;
 }
 
+static struct CurlInit
+{
+	CurlInit()
+	{
+		curl_global_init(CURL_GLOBAL_ALL);
+	}
+} curlInit;
+
 int DL_RequestURL(const char* url, char* buffer, size_t bufSize)
 {
-	curl_global_init(CURL_GLOBAL_ALL);
-
-	CURL* curl = curl_easy_init();
+	CURL* curl = curl_easy_init_cfx();
 
 	if (curl)
 	{
@@ -864,10 +960,14 @@ int DL_RequestURL(const char* url, char* buffer, size_t bufSize)
 		curl_easy_setopt(curl, CURLOPT_FAILONERROR, true);
 		curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, g_curlError);
 
+		if (getenv("CFX_CURL_DEBUG"))
+		{
+			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
+			curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DL_CurlDebug);
+		}
+
 		CURLcode code = curl_easy_perform(curl);
 		curl_easy_cleanup(curl);
-
-		curl_global_cleanup();
 
 		buffer[bufferData.curSize] = '\0';
 
@@ -880,8 +980,6 @@ int DL_RequestURL(const char* url, char* buffer, size_t bufSize)
 			return (int)code;
 		}
 	}
-
-	curl_global_cleanup();
 
 	return 0;
 }

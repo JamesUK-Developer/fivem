@@ -288,8 +288,17 @@ static void(*g_origLoadObjectsNow)(void*, bool);
 
 #include <ICoreGameInit.h>
 
+static void* volatile* resourcePlacement;
+
 static void LoadObjectsNowWrap(void* streaming, bool a2)
 {
+	// await resource placement having initialized first (the game does this very asynchronously, but doesn't ever block on it)
+	while (!*resourcePlacement)
+	{
+		YieldProcessor();
+	}
+
+	// usual loop
 	uint64_t beginTime = GetTickCount64();
 
 	ICoreGameInit* init = Instance<ICoreGameInit>::Get();
@@ -420,7 +429,8 @@ static HookFunction hookFunction([] ()
 	registerPools(hook::pattern("BA ? ? ? ? 41 B8 ? ? ? 00 E8 ? ? ? ? 4C 8D 05"), 0x2C, 1);
 	registerPools(hook::pattern("C6 BA ? ? ? ? E8 ? ? ? ? 4C 8D 05"), 0x27, 2);
 	registerPools(hook::pattern("BA ? ? ? ? E8 ? ? ? ? C6 ? ? ? 01 4C"), 0x2F, 1);
-	registerPools(hook::pattern("BA ? ? ? ? 41 B8 ? 00 00 00 E8 ? ? ? ? C6"), 0x35, 1);
+	registerPools(hook::pattern("BA ? ? ? ? 41 B8 ? ? 00 00 E8 ? ? ? ? C6"), 0x35, 1);
+	registerPools(hook::pattern("44 8B C0 BA ? ? ? ? E8 ? ? ? ? 4C 8D 05"), 0x25, 4);
 
 	// min hook
 	MH_CreateHook(hook::get_pattern("18 83 F9 FF 75 03 33 C0 C3 41", -6), PoolAllocateWrap, (void**)&g_origPoolAllocate);
@@ -446,4 +456,10 @@ static HookFunction hookFunction([] ()
 	//hook::nop(0x141056E6F, 5);
 
 	MH_EnableHook(MH_ALL_HOOKS);
+
+	// resource placement internal ptr
+	{
+		char* basePtr = hook::get_address<char*>(hook::get_pattern("48 89 85 30 02 00 00 48 8D 45 30 48 8D 0D", 14));
+		resourcePlacement = (decltype(resourcePlacement))(basePtr + *hook::get_pattern<uint32_t>("7E 22 48 8B 8B ? ? ? ? 8B D7 48 69", 5));
+	}
 });

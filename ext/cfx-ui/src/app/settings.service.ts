@@ -19,6 +19,7 @@ export class Setting {
 	labelCb?: () => Observable<string>;
 	colorizeValue?: boolean;
 	category?: string;
+	displayDefault?: string;
 
 	getCb?: () => Observable<string>;
 	setCb?: (value: string) => void;
@@ -69,22 +70,27 @@ export class SettingsService {
 			category: '#SettingsCat_Interface',
 		});
 
-		this.addSetting('devMode', {
-			name: '#Settings_DevMode',
-			description: '#Settings_DevModeDesc',
-			type: 'checkbox',
-			getCb: () => this.gameService.devModeChange.map(a => a ? 'true' : 'false'),
-			setCb: (value) => this.gameService.devMode = (value === 'true'),
-			category: '#SettingsCat_Interface',
-		});
+		this.addSetting('uiPerformance', {
+			name: '#Settings_LowPerfMode',
+			description: '#Settings_LowPerfModeDesc',
+			type: 'switch',
+			getCb: () => this.gameService.getConvar('ui_blurPerfMode'),
+			setCb: (value) => this.gameService.setArchivedConvar('ui_blurPerfMode', value),
+			options: {
+				'off': '#Settings_LowPerf_Off',
+				'backdrop': '#Settings_LowPerf_ReduceBackdrop',
+				'none': '#Settings_LowPerf_ReduceFull',
+			},
+			displayDefault: 'off',
+			category: '#SettingsCat_Interface'
+		})
 
 		this.addSetting('localhostPort', {
-			name: '#Settings_LocalhostPort',
-			description: '#Settings_LocalhostPort',
+			name: '#Settings_LocalhostPort2',
+			description: '#Settings_LocalhostPort2',
 			type: 'text',
 			getCb: () => this.gameService.localhostPortChange,
 			setCb: (value) => this.gameService.localhostPort = value,
-			showCb: () => this.gameService.devModeChange,
 			category: '#SettingsCat_Interface',
 		});
 
@@ -111,7 +117,7 @@ export class SettingsService {
 				name: '#Settings_GameStreamProgress',
 				description: '#Settings_GameStreamProgressDesc',
 				type: 'checkbox',
-				getCb: () => this.gameService.getConvar('game_showStreamingProgress'),
+				getCb: () => this.gameService.getConvar('game_showStreamingProgress').pipe(map(a => a === 'true' ? 'true' : 'false')),
 				setCb: (value) => this.gameService.setConvar('game_showStreamingProgress', value),
 				category: '#SettingsCat_Game',
 			});
@@ -231,20 +237,20 @@ export class SettingsService {
 				colorizeValue: true,
 				category: '#SettingsCat_Account',
 			});
-
-			this.addSetting('updateChannel', {
-				name: '#Settings_UpdateChannel',
-				description: '#Settings_UpdateChannelDesc',
-				type: 'switch',
-				getCb: () => this.gameService.getConvar('ui_updateChannel'),
-				setCb: (value) => this.gameService.setConvar('ui_updateChannel', value),
-				options: {
-					'production': 'Release',
-					'canary': 'Canary (Experimental/Unstable)',
-				},
-				category: '#SettingsCat_Game',
-			});
 		}
+
+		this.addSetting('updateChannel', {
+			name: '#Settings_UpdateChannel',
+			description: '#Settings_UpdateChannelDesc',
+			type: 'switch',
+			getCb: () => this.gameService.getConvar('ui_updateChannel'),
+			setCb: (value) => this.gameService.setConvar('ui_updateChannel', value),
+			options: {
+				'production': 'Release',
+				'canary': 'Canary (Experimental/Unstable)',
+			},
+			category: '#SettingsCat_Game',
+		});
 	}
 
 	public addSetting(label: string, setting: Setting) {

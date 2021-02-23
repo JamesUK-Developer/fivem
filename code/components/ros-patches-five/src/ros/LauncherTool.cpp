@@ -28,6 +28,7 @@
 #include <CrossBuildRuntime.h>
 
 #include "Hooking.h"
+#include "Hooking.Aux.h"
 
 bool CanSafelySkipLauncher()
 {
@@ -152,7 +153,7 @@ static void Steam_Run(const boost::program_options::variables_map& map)
 
 	ValidateSteam(g_rosParentPid);
 
-	HANDLE hEvent = OpenEvent(EVENT_MODIFY_STATE, FALSE, L"CitizenFX_GTA5_ClearedForLaunch");
+	HANDLE hEvent = OpenEvent(EVENT_MODIFY_STATE, FALSE, L"CitizenFX_GTA5_ClearedForLaunch_Steam");
 
 	if (hEvent != INVALID_HANDLE_VALUE)
 	{
@@ -160,6 +161,17 @@ static void Steam_Run(const boost::program_options::variables_map& map)
 		CloseHandle(hEvent);
 	}
 
+	TerminateProcess(GetCurrentProcess(), 0);
+}
+
+void ValidateEpic(int parentPid);
+
+static void Epic_Run(const boost::program_options::variables_map& map)
+{
+	auto args = map["cake"].as<std::vector<std::wstring>>();
+	g_rosParentPid = map["parent_pid"].as<int>();
+
+	ValidateEpic(g_rosParentPid);
 	TerminateProcess(GetCurrentProcess(), 0);
 }
 
@@ -432,6 +444,9 @@ static BOOL ShellExecuteExWStub(_Inout_ SHELLEXECUTEINFOW *pExecInfo)
 {
 	if (pExecInfo->lpFile && wcsstr(pExecInfo->lpFile, L"RockstarService"))
 	{
+		// setting SEE_MASK_FLAG_NO_UI bypasses some slow stuff
+		pExecInfo->fMask |= SEE_MASK_FLAG_NO_UI;
+
 		return ShellExecuteExW(pExecInfo);
 	}
 
@@ -453,14 +468,16 @@ HINSTANCE ShellExecuteWStub(_In_opt_ HWND hwnd, _In_opt_ LPCWSTR lpOperation, _I
 	return NULL;
 }
 
+extern HRESULT WINAPI CoCreateInstanceStub(_In_ REFCLSID rclsid, _In_opt_ LPUNKNOWN pUnkOuter, _In_ DWORD dwClsContext, _In_ REFIID riid, _COM_Outptr_ _At_(*ppv, _Post_readable_size_(_Inexpressible_(varies))) LPVOID FAR* ppv);
+extern BOOL CreateProcessAStub(_In_opt_ LPCSTR lpApplicationName, _Inout_opt_ LPSTR lpCommandLine, _In_opt_ LPSECURITY_ATTRIBUTES lpProcessAttributes, _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes, _In_ BOOL bInheritHandles, _In_ DWORD dwCreationFlags, _In_opt_ LPVOID lpEnvironment, _In_opt_ LPCSTR lpCurrentDirectory, _In_ LPSTARTUPINFOA lpStartupInfo, _Out_ LPPROCESS_INFORMATION lpProcessInformation);
 HANDLE CreateNamedPipeAHookL(_In_ LPCSTR lpName, _In_ DWORD dwOpenMode, _In_ DWORD dwPipeMode, _In_ DWORD nMaxInstances, _In_ DWORD nOutBufferSize, _In_ DWORD nInBufferSize, _In_ DWORD nDefaultTimeOut, _In_opt_ LPSECURITY_ATTRIBUTES lpSecurityAttributes);
 
 static void Launcher_Run(const boost::program_options::variables_map& map)
 {
 	// make firstrun.dat so the launcher won't whine/crash
 	{
-		CreateDirectoryW(MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata2").c_str(), NULL);
-		FILE* f = _wfopen(MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata2\\firstrun.dat").c_str(), L"wb");
+		CreateDirectoryW(MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata3").c_str(), NULL);
+		FILE* f = _wfopen(MakeRelativeCitPath(L"cache\\game\\ros_launcher_appdata3\\firstrun.dat").c_str(), L"wb");
 
 		if (f)
 		{
@@ -496,6 +513,8 @@ static void Launcher_Run(const boost::program_options::variables_map& map)
 			((void(*)(const wchar_t*))GetProcAddress(rosDll, "run"))(MakeRelativeCitPath(L"").c_str());
 		}
 
+		DisableToolHelpScope scope;
+
 		// wfsopen debug hook
 		/*void* call = hook::pattern("49 8B 94 DE ? ? ? ? 44 8B C6 48 8B CD E8").count(1).get(0).get<void>(14);
 
@@ -508,7 +527,7 @@ static void Launcher_Run(const boost::program_options::variables_map& map)
 		MH_CreateHook(pref, pf, (void**)&opf);
 		MH_EnableHook(MH_ALL_HOOKS);
 
-		hook::jump(hook::get_pattern("4C 89 44 24 18 4C 89 4C 24 20 C3"), LogStuff);
+		hook::jump(hook::get_pattern("4C 89 44 24 18 4C 89 4C 24 20 48 83 EC 28 48 8D"), LogStuff);
 
 		hook::iat("version.dll", GetFileVersionInfoAStub, "GetFileVersionInfoA");
 
@@ -529,6 +548,9 @@ static void Launcher_Run(const boost::program_options::variables_map& map)
 
 		hook::iat("kernel32.dll", GetProcAddressStub, "GetProcAddress");
 		hook::iat("kernel32.dll", GetModuleFileNameWStub, "GetModuleFileNameW");
+
+		hook::iat("ole32.dll", CoCreateInstanceStub, "CoCreateInstance");
+		hook::iat("kernel32.dll", CreateProcessAStub, "CreateProcessA");
 
 		HMODULE hSteam = LoadLibrary(L"C:\\Program Files\\Rockstar Games\\Launcher\\steam_api64.dll");
 
@@ -573,6 +595,7 @@ static void Launcher_Run(const boost::program_options::variables_map& map)
 static FxToolCommand rosSubprocess("ros:launcher", Launcher_HandleArguments, Launcher_Run);
 static FxToolCommand rosSubprocess2("ros:legit", Launcher_HandleArguments, Legit_Run);
 static FxToolCommand rosSubprocess3("ros:steam", Launcher_HandleArguments, Steam_Run);
+static FxToolCommand rosSubprocess4("ros:epic", Launcher_HandleArguments, Epic_Run);
 
 void RunLauncher(const wchar_t* toolName, bool instantWait);
 void RunLauncherAwait();
@@ -586,9 +609,11 @@ bool LoadOwnershipTicket();
 
 void OnPreInitHook();
 void PreInitGameSpec();
+void LoadOwnershipEarly();
 
 void Component_RunPreInit()
 {
+	LoadOwnershipEarly();
 	OnPreInitHook();
 	PreInitGameSpec();
 
@@ -663,6 +688,8 @@ DWORD NotifyIpInterfaceChangeFake(_In_ ADDRESS_FAMILY Family, _In_ void* Callbac
 
 static InitFunction initFunctionF([]()
 {
+	DisableToolHelpScope scope;
+
 	// #TODORDR: this hangs on pre-20H1 Windows in a chain from WinVerifyTrust leading to an infinite wait??
 	MH_Initialize();
 	MH_CreateHookApi(L"iphlpapi.dll", "NotifyIpInterfaceChange", NotifyIpInterfaceChangeFake, NULL);
@@ -683,11 +710,20 @@ static HookFunction hookFunction([] ()
 	{
 		hook::iat("crypt32.dll", CertGetNameStringStubW, "CertGetNameStringW");
 		hook::iat("crypt32.dll", CertGetNameStringStubA, "CertGetNameStringA");
-		hook::iat("kernel32.dll", LocalFreeStub, "LocalFree");
+		hook::iat("wintrust.dll", WinVerifyTrustStub, "WinVerifyTrust");
 	}
+
+	// newer SC SDK will otherwise overflow in cert name
+#ifndef IS_RDR3
+	hook::iat("crypt32.dll", CertGetNameStringStubA, "CertGetNameStringA");
+	hook::iat("kernel32.dll", LocalFreeStub, "LocalFree");
+#endif
 
     hook::iat("user32.dll", LoadIconStub, "LoadIconA");
     hook::iat("user32.dll", LoadIconStub, "LoadIconW");
+
+	hook::iat("ole32.dll", CoCreateInstanceStub, "CoCreateInstance");
+	hook::iat("kernel32.dll", CreateProcessAStub, "CreateProcessA");
 
 #ifdef GTA_FIVE
 	// bypass the check routine for sky init
@@ -699,6 +735,6 @@ static HookFunction hookFunction([] ()
 	// same for distantlights
 	void* distantLightInit = hook::pattern("48 8D 68 A1 48 81 EC F0 00 00 00 BE 01 00").count(1).get(0).get<void>(-0x10);
 
-	hook::call(skyInitLoc + (Is2060() ? 0x2FA : 0x30B), distantLightInit);
+	hook::call(skyInitLoc + (xbr::IsGameBuildOrGreater<2060>() ? 0x2FA : 0x30B), distantLightInit);
 #endif
 });

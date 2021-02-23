@@ -74,7 +74,7 @@ public:
 				std::string pr = pathRef;
 #endif
 
-				resource = m_manager->CreateResource(fragRef);
+				resource = m_manager->CreateResource(fragRef, this);
 				if (!resource->LoadFrom(*skyr::percent_decode(pr)))
 				{
 					m_manager->RemoveResource(resource);
@@ -174,7 +174,7 @@ static void ScanResources(fx::ServerInstanceBase* instance)
 		{
 			do
 			{
-				if (findData.name[0] == '.')
+				if (findData.name == "." || findData.name == "..")
 				{
 					continue;
 				}
@@ -311,6 +311,33 @@ public:
 
 			client->SendPacket(1, outPacket);
 		}
+	}
+
+	virtual bool LimitEvent(int source) override
+	{
+		static fx::RateLimiterStore<uint32_t, false> netEventRateLimiterStore{ instance->GetComponent<console::Context>().GetRef() };
+		static auto netEventRateLimiter = netEventRateLimiterStore.GetRateLimiter("netEvent", fx::RateLimiterDefaults{ 50.f, 200.f });
+		static auto netFloodRateLimiter = netEventRateLimiterStore.GetRateLimiter("netEventFlood", fx::RateLimiterDefaults{ 75.f, 300.f });
+
+		if (!netEventRateLimiter->Consume(source))
+		{
+			if (!netFloodRateLimiter->Consume(source))
+			{
+				gscomms_execute_callback_on_main_thread([this, source]()
+				{
+					auto client = instance->GetComponent<fx::ClientRegistry>()->GetClientByNetID(source);
+
+					if (client)
+					{
+						instance->GetComponent<fx::GameServer>()->DropClient(client, "Unreliable network event overflow.");
+					}
+				}, true);
+			}
+
+			return true;
+		}
+
+		return false;
 	}
 
 public:
@@ -721,6 +748,25 @@ static InitFunction initFunction([]()
 
 		gameServer->GetComponent<fx::HandlerMapComponent>()->Add(HashRageString("msgServerCommand"), [=](const fx::ClientSharedPtr& client, net::Buffer& buffer)
 		{
+			static fx::RateLimiterStore<uint32_t, false> netEventRateLimiterStore{ instance->GetComponent<console::Context>().GetRef() };
+			static auto netEventRateLimiter = netEventRateLimiterStore.GetRateLimiter("netCommand", fx::RateLimiterDefaults{ 7.f, 14.f });
+			static auto netFloodRateLimiter = netEventRateLimiterStore.GetRateLimiter("netCommandFlood", fx::RateLimiterDefaults{ 25.f, 45.f });
+
+			uint32_t netId = client->GetNetId();
+
+			if (!netEventRateLimiter->Consume(netId))
+			{
+				if (!netFloodRateLimiter->Consume(netId))
+				{
+					gscomms_execute_callback_on_main_thread([client, instance]()
+					{
+						instance->GetComponent<fx::GameServer>()->DropClient(client, "Reliable server command overflow.");
+					});
+				}
+
+				return;
+			}
+
 			auto cmdLen = buffer.Read<uint16_t>();
 
 			std::vector<char> cmd(cmdLen);

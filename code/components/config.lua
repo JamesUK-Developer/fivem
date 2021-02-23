@@ -12,6 +12,11 @@ component 'profiles'
 if _OPTIONS['game'] == 'server' then
 	component 'citizen-server-main'
 	component 'citizen-server-net'
+	
+	if os.istarget('windows') then
+		component 'citizen-server-gui'
+		component 'citizen-devtools'
+	end
 	--[[if os.is('windows') then
 		component 'citizen-ssh-server'
 	end]]
@@ -25,6 +30,7 @@ if _OPTIONS['game'] == 'server' then
 	component 'citizen-server-monitor'
 	component 'vfs-impl-server'
 else
+	component 'citizen-devtools'
 	component 'legacy-game-re3'
 	component 'sticky'
 

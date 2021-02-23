@@ -2,11 +2,14 @@
 	<div class="oi">
 		<div class="left">
 			<ul class="links">
+				<li (click)="openLink('https://fivem.net')" aria-label="Opens in browser" data-balloon-pos="right" *ngIf="gameName == 'gta5'">
+					FiveM.net
+				</li>
+				<li (click)="openLink('https://redm.gg')" aria-label="Opens in browser" data-balloon-pos="right" *ngIf="gameName == 'rdr3'">
+					RedM.gg
+				</li>
 				<li (click)="openLink('https://forum.cfx.re')" aria-label="Opens in browser" data-balloon-pos="right">
 					Forum
-				</li>
-				<li (click)="openLink('https://discord.gg/fivem')" aria-label="Opens in browser" data-balloon-pos="right">
-					Discord
 				</li>
 				<li (click)="openLink('https://patreon.com/fivem')" aria-label="Opens in browser" data-balloon-pos="right">
 					Patreon
@@ -22,7 +25,7 @@
 			>
 			</div>
 		</div>
-		<div class="right">
+		<div class="right" *ngIf="gameName != 'rdr3'">
 			<div class="player-stats" *ngIf="playerStats">
 				<div
 					aria-label="Current players count"
@@ -86,9 +89,9 @@
 						{{HistoryServerStatus[lastServer.status]}}
 					</span>
 
-					<span class="time">
+					<span class="time" *ngIf="lastServer.historyEntry.time">
 						{{ '#DirectConnect_LastPlayed' | translate:locale.language }}:
-						{{ lastServer.historyEntry.time | amTimeAgo }}
+						{{ lastServer.historyEntry.time | dfnsFormatDistanceToNow:{ addSuffix: true } }}
 					</span>
 				</div>
 			</div>
@@ -123,6 +126,38 @@
 			</a>
 		</div>
 
+		<a class="card ad"
+			[routerLink]="[(this.topServer) ? '/servers/detail/' + this.topServer.address : '']"
+			style="--banner-image: url({{this.topServer?.data?.vars?.banner_detail || 'nah'}})">
+			<div *ngIf="this.topServer">
+				<h3 class="card_title">
+					<span class="material-icons-outlined">trending_up</span>
+					<span *ngIf="!this.currentAccount">AD: </span>
+					<span [innerHTML]="(this.topServer && this.topServer.hostname)||'test' | escape | colorize"></span>
+				</h3>
+
+				<section>
+					<div>
+						<span [class]="'flag-icon flag-icon-' + this.topServer.data.vars.locale.split('-')[1].toLowerCase()"></span>
+					</div>
+
+					<div>
+						<span class="material-icons-outlined">group</span>
+						{{(this.topServer && this.topServer.currentPlayers)||0}}<span class="capacity">/{{(this.topServer && this.topServer.maxPlayers)||32}}</span>
+					</div>
+
+					<div>
+						<span class="material-icons-outlined">arrow_upward</span>
+						{{(this.topServer && this.topServer.upvotePower)||0}}
+					</div>
+					
+					<span *ngIf="!this.currentAccount" l10nTranslate>
+						#Home_AdDetail
+					</span>
+				</section>
+			</div>
+		</a>
+
 		<a class="card story" [routerLink]="['/story']" *ngIf="gameName !== 'rdr3'">
 			<h3 class="card_title">
 				<span class="material-icons-outlined">play_arrow</span>
@@ -155,7 +190,8 @@
 		</div>
 
 		<div class="tweets official">
-			<div class="title">FiveM Official</div>
+			<div class="title" *ngIf="gameName === 'gta5'">FiveM Official</div>
+			<div class="title" *ngIf="gameName !== 'gta5'">Cfx.re Official</div>
 			<app-home-tweet class="message" actuallyTweet="true" *ngFor="let tweet of officialTweets" [tweet]="tweet">
 			</app-home-tweet>
 		</div>

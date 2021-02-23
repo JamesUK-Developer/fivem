@@ -94,6 +94,8 @@ public:
 
 	void TouchMessage();
 
+	void InitializeRenderBacking();
+
 	inline const std::string& GetName()
 	{
 		return m_name;
@@ -139,6 +141,8 @@ public:
 
 private:
 	CefString m_initUrl;
+
+	bool m_isMuted = false;
 
 public:
 	~NUIWindow();

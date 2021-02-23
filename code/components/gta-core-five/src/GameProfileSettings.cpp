@@ -200,7 +200,7 @@ static hook::cdecl_stub<void(int idx, int, int)> _updatePref([]()
 		return (void*)nullptr;
 	}
 
-	return hook::get_pattern("83 F9 62 0F 8F ? ? 00 00 83 F9 61 0F", (Is2060()) ? -0x29 : -0x23);
+	return hook::get_pattern("83 F9 62 0F 8F ? ? 00 00 83 F9 61 0F", (xbr::IsGameBuildOrGreater<2060>()) ? -0x29 : -0x23);
 });
 
 void ProfileSettingsInit()
@@ -240,6 +240,13 @@ void ProfileSettingsInit()
 				}
 
 				name = "profile_" + name;
+
+				// profile_vidMonitor pointing to an invalid index will crash the game when opening settings, and
+				// the game doesn't use the profile setting as authoritative anyway
+				if (name == "profile_vidMonitor")
+				{
+					continue;
+				}
 
 				auto setting = g_prefs[field->index];
 				_profileConVars[field->index] = std::make_shared<ProfileConVar>(name, setting);

@@ -220,7 +220,7 @@ private:
 };
 
 #if defined(IS_RDR3)
-bool GetMTLSessionInfo(std::string& ticket, std::string& sessionTicket, std::array<uint8_t, 16>& sessionKey);
+bool GetMTLSessionInfo(std::string& ticket, std::string& sessionTicket, std::array<uint8_t, 16>& sessionKey, uint64_t& accountId);
 
 static std::string GetRosTicket(const std::string& body)
 {
@@ -229,8 +229,9 @@ static std::string GetRosTicket(const std::string& body)
 	std::string ticket;
 	std::string sessionTicket;
 	std::array<uint8_t, 16> sessionKeyArray;
+	uint64_t accountId = 0;
 	
-	assert(GetMTLSessionInfo(ticket, sessionTicket, sessionKeyArray));
+	assert(GetMTLSessionInfo(ticket, sessionTicket, sessionKeyArray, accountId));
 
 	std::string sessionKey = Botan::base64_encode(sessionKeyArray.data(), 16);
 
@@ -240,7 +241,16 @@ static std::string GetRosTicket(const std::string& body)
 	doc2.AddMember("ticket", rapidjson::Value(ticket.c_str(), doc2.GetAllocator()), doc2.GetAllocator());
 	doc2.AddMember("sessionKey", rapidjson::Value(sessionKey.c_str(), doc2.GetAllocator()), doc2.GetAllocator());
 	doc2.AddMember("sessionTicket", rapidjson::Value(sessionTicket.c_str(), doc2.GetAllocator()), doc2.GetAllocator());
-	doc2.AddMember("payload", rapidjson::Value(postData["payload"].c_str(), doc2.GetAllocator()), doc2.GetAllocator());
+
+	if (postData.find("payload") != postData.end())
+	{
+		doc2.AddMember("payload", rapidjson::Value(postData["payload"].c_str(), doc2.GetAllocator()), doc2.GetAllocator());
+	}
+	else
+	{
+		doc2.AddMember("machineHash", rapidjson::Value(postData["machineHash"].c_str(), doc2.GetAllocator()), doc2.GetAllocator());
+		doc2.AddMember("locale", rapidjson::Value(postData["locale"].c_str(), doc2.GetAllocator()), doc2.GetAllocator());
+	}
 
 	rapidjson::StringBuffer sb;
 	rapidjson::Writer<rapidjson::StringBuffer> w(sb);
@@ -274,7 +284,11 @@ static InitFunction initFunction([] ()
 		auto accountId = ROS_DUMMY_ACCOUNT_ID;
 		auto machineHash = postData["machineHash"];
 
+#ifdef GTA_FIVE
 		auto outStr = GetEntitlementBlock(accountId, machineHash);
+#elif IS_RDR3
+		auto outStr = GetRosTicket(body);
+#endif
 
 		return fmt::sprintf(
 			"<?xml version=\"1.0\" encoding=\"utf-8\"?><Response xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ms=\"0.574\" xmlns=\"GetEntitlementBlockResponse\"><Status>1</Status><Result Version=\"1\"><Data>%s</Data></Result></Response>",
@@ -673,6 +687,19 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 #endif
 	});
 
+	mapper->AddGameService("legalpolicies.asmx/GetAcceptedVersion", [](const std::string& body)
+	{
+		auto postData = ParsePOSTString(body);
+
+		return fmt::sprintf(R"(<?xml version="1.0" encoding="utf-8"?>
+<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="http://services.ros.rockstargames.com/">
+  <Status>1</Status>
+  <Version>4</Version>
+  <PolicyTag>%s</PolicyTag>
+</Response>)",
+		postData["policyTag"]);
+	});
+
 	mapper->AddGameService("App.asmx/GetBuildManifestFull", [](const std::string& body)
 	{
 		auto postData = ParsePOSTString(body);
@@ -692,17 +719,19 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 			auto rs = rss.str();
 			rs = "";
 
-			return fmt::sprintf(R"(
+			if (Is1355())
+			{
+				return fmt::sprintf(R"(
 <?xml version="1.0" encoding="utf-8"?>
 <Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
   <Status>1</Status>
-  <Result BuildId="76" VersionNumber="1.0.1311.12" BuildDateUtc="2019-11-05T11:39:37.0266667">
+  <Result BuildId="80" VersionNumber="1.0.1355.18" BuildDateUtc="2019-11-05T11:39:37.0266667">
     <FileManifest>
-		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="91302016" TimestampUtc="2019-11-05T11:39:34.8800000">
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="84664448" TimestampUtc="2019-11-05T11:39:34.8800000">
 			<RelativePath>RDR2.exe</RelativePath>
-			<SHA256Hash>9ad05239dea6154520eadaa69b6b3b9af6de008a61b9079b52d9fd46f390d019</SHA256Hash>
+			<SHA256Hash>e80698b7f53395912d34bbbf15ac852b452126e7315b3a5115a6d9a30ad33d4c</SHA256Hash>
 			<FileChunks>
-				<Chunk FileChunkId="13046" SHA256Hash="9ad05239dea6154520eadaa69b6b3b9af6de008a61b9079b52d9fd46f390d019" StartByteOffset="0" Size="91302016" />
+				<Chunk FileChunkId="13046" SHA256Hash="e80698b7f53395912d34bbbf15ac852b452126e7315b3a5115a6d9a30ad33d4c" StartByteOffset="0" Size="84664448" />
 			</FileChunks>
 		</FileDetails>
 %s
@@ -710,6 +739,28 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
     <IsPreload>false</IsPreload>
   </Result>
 </Response>)", rs);
+			}
+			else
+			{
+				return fmt::sprintf(R"(
+<?xml version="1.0" encoding="utf-8"?>
+<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
+  <Status>1</Status>
+  <Result BuildId="79" VersionNumber="1.0.1311.20" BuildDateUtc="2019-11-05T11:39:37.0266667">
+    <FileManifest>
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="91439232" TimestampUtc="2019-11-05T11:39:34.8800000">
+			<RelativePath>RDR2.exe</RelativePath>
+			<SHA256Hash>2fa69ba127e8c43b06bbec8e65a5fb94359194d961e8067466ca9c7fb6ffba90</SHA256Hash>
+			<FileChunks>
+				<Chunk FileChunkId="13046" SHA256Hash="2fa69ba127e8c43b06bbec8e65a5fb94359194d961e8067466ca9c7fb6ffba90" StartByteOffset="0" Size="91439232" />
+			</FileChunks>
+		</FileDetails>
+%s
+    </FileManifest>
+    <IsPreload>false</IsPreload>
+  </Result>
+</Response>)", rs);
+			}
 		}
 		else if (postData["branchAccessToken"].find("GTA5") != std::string::npos)
 		{
@@ -726,6 +777,26 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
 			<SHA256Hash>7b3c0053db37eca7c6cdd0ecd268882cdd5f693f416e5a8e97fd31de66324d04</SHA256Hash>
 			<FileChunks>
 				<Chunk FileChunkId="13046" SHA256Hash="7b3c0053db37eca7c6cdd0ecd268882cdd5f693f416e5a8e97fd31de66324d04" StartByteOffset="0" Size="55559560" />
+			</FileChunks>
+		</FileDetails>
+    </FileManifest>
+    <IsPreload>false</IsPreload>
+  </Result>
+</Response>)");
+			}
+			else if (Is2189())
+			{
+				return fmt::sprintf(R"(
+<?xml version="1.0" encoding="utf-8"?>
+<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ms="0" xmlns="GetBuildManifestFull">
+  <Status>1</Status>
+  <Result BuildId="88" VersionNumber="1.0.2189.0" BuildDateUtc="2019-11-05T11:39:37.0266667">
+    <FileManifest>
+		<FileDetails FileEntryId="9178" FileEntryVersionId="9648" FileSize="63124096" TimestampUtc="2019-11-05T11:39:34.8800000">
+			<RelativePath>GTA5.exe</RelativePath>
+			<SHA256Hash>3f83e88b7ac80b4cf4a1f60a8ac8241b1c6c7235b897db315778c2f31a98cdeb</SHA256Hash>
+			<FileChunks>
+				<Chunk FileChunkId="13046" SHA256Hash="3f83e88b7ac80b4cf4a1f60a8ac8241b1c6c7235b897db315778c2f31a98cdeb" StartByteOffset="0" Size="63124096" />
 			</FileChunks>
 		</FileDetails>
     </FileManifest>
@@ -799,6 +870,15 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
     <App Id="10" Name="rdr2" TitleId="13" IsReleased="true">
       <Branches />
     </App>
+	<App Id="12" Name="rdr2_rdo" TitleId="13" IsReleased="false">
+		<Branches/>
+	</App>
+	<App Id="13" Name="rdr2_sp" TitleId="13" IsReleased="false">
+		<Branches/>
+	</App>
+	<App Id="14" Name="rdr2_sp_rgl" TitleId="13" IsReleased="false">
+		<Branches/>
+	</App>
     <App Id="6" Name="gtasa" TitleId="18" IsReleased="true">
       <Branches />
     </App>
@@ -847,10 +927,34 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
     <App Id="10" Name="rdr2" TitleId="13" IsReleased="true">
 		<!--<Branches />-->
       <Branches>
-        <Branch Id="12" Name="default" BuildId="76" IsDefault="true" AppId="10">
+        <Branch Id="12" Name="default" BuildId="%d" IsDefault="true" AppId="10">
           <AccessToken>BRANCHACCESS token="RDR2",signature="RDR2"</AccessToken>
         </Branch>
       </Branches>
+    </App>
+    <App Id="12" Name="rdr2_rdo" TitleId="13" IsReleased="false">
+		<!--<Branches />-->
+      <Branches>
+        <Branch Id="14" Name="default" BuildId="-1" IsDefault="true" AppId="12">
+          <AccessToken>BRANCHACCESS token="RDR2",signature="RDR2"</AccessToken>
+        </Branch>
+      </Branches>
+    </App>
+    <App Id="13" Name="rdr2_sp" TitleId="13" IsReleased="false">
+		<Branches />
+      <!--<Branches>
+        <Branch Id="16" Name="default" BuildId="-1" IsDefault="true" AppId="13">
+          <AccessToken>BRANCHACCESS token="RDR2",signature="RDR2"</AccessToken>
+        </Branch>
+      </Branches>-->
+    </App>
+    <App Id="14" Name="rdr2_sp_rgl" TitleId="13" IsReleased="false">
+		<Branches />
+      <!--<Branches>
+        <Branch Id="15" Name="default" BuildId="-1" IsDefault="true" AppId="14">
+          <AccessToken>BRANCHACCESS token="RDR2",signature="RDR2"</AccessToken>
+        </Branch>
+      </Branches>-->
     </App>
     <App Id="6" Name="gtasa" TitleId="18" IsReleased="true">
       <Branches />
@@ -875,7 +979,9 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
       <Branches />
     </App>
   </Result>
-</Response>)", Is372() ? 4 : (Is2060() ? 83 : 80));
+</Response>)",
+		Is372() ? 4 : (Is2060() ? 83 : (Is2189() ? 88 : 80)),
+		Is1355() ? 80 : 79);
 	});
 
 

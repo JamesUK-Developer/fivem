@@ -128,6 +128,11 @@ public:
 	{
 		return m_remoteAddress.ToString();
 	}
+
+	inline const net::PeerAddress& GetRemotePeer() const
+	{
+		return m_remoteAddress;
+	}
 };
 
 struct HttpState
@@ -193,11 +198,16 @@ public:
 
 	inline void SetHeader(const HeaderString& name, const std::vector<std::string>& values)
 	{
+		std::vector<HeaderString> headers;
+		headers.reserve(values.size());
+
 		for (auto& value : values)
 		{
-			SetHeader(name, HeaderString{
-							value.c_str(), value.size() });
+			headers.push_back(HeaderString{
+				value.c_str(), value.size() });
 		}
+
+		SetHeader(name, headers);
 	}
 
 	void WriteHead(int statusCode);

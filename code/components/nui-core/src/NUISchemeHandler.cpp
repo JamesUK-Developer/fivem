@@ -15,9 +15,6 @@
 
 #include "memdbgon.h"
 
-static std::atomic<int> g_fileHandleCount;
-static std::queue<std::function<void()>> g_deleteQueue;
-
 static nui::TResourceLookupFn g_resourceLookupFunc;
 
 extern const std::map<std::string, std::string, std::less<>> g_mimeTypeMap;
@@ -59,14 +56,6 @@ public:
 		{
 			device_->Close(file_);
 		}
-
-		g_fileHandleCount.fetch_sub(1);
-
-		if (!g_deleteQueue.empty())
-		{
-			g_deleteQueue.front()();
-			g_deleteQueue.pop();
-		}
 	}
 
 	virtual bool ProcessRequest(CefRefPtr<CefRequest> request, CefRefPtr<CefCallback> callback)
@@ -98,15 +87,14 @@ public:
 
 			if (g_resourceLookupFunc)
 			{
-				filename_ = g_resourceLookupFunc(ToNarrow(hostname));
+				filename_ = g_resourceLookupFunc(ToNarrow(hostname), ToNarrow(path));
 			}
 			else
 			{
 				filename_ = "resources:/";
 				filename_ += converter.to_bytes(hostname) + "/";
+				filename_ += converter.to_bytes(path);
 			}
-
-			filename_ += converter.to_bytes(path);
 		}
 
 		// remove # parts
@@ -114,7 +102,6 @@ public:
 
 		if (hash != std::string::npos)
 		{
-			//filename_.resize(hash);
 			filename_.erase(hash);
 		}
 
@@ -122,7 +109,6 @@ public:
 
 		if (hash != std::string::npos)
 		{
-			//filename_.resize(hash);
 			filename_.erase(hash);
 		}
 
@@ -133,38 +119,24 @@ public:
 
 		device_ = vfs::GetDevice(filename_);
 
-		int count = g_fileHandleCount.fetch_add(1);
-
-		auto handleOpen = [=] ()
+		if (device_.GetRef() && filename_.find("..") == std::string::npos)
 		{
-			if (device_.GetRef() && filename_.find("..") == std::string::npos)
-			{
-				file_ = device_->Open(filename_.c_str(), true);
-			}
-
-			// set mime type
-			std::string ext = url.substr(url.rfind('.') + 1);
-
-			mimeType_ = "text/html";
-
-			auto it = g_mimeTypeMap.find(ext);
-
-			if (it != g_mimeTypeMap.end())
-			{
-				mimeType_ = it->second;
-			}
-
-			callback->Continue();
-		};
-
-		if (count < 2)
-		{
-			handleOpen();
+			file_ = device_->Open(filename_.c_str(), true);
 		}
-		else
+
+		// set mime type
+		std::string ext = url.substr(url.rfind('.') + 1);
+
+		mimeType_ = "text/html";
+
+		auto it = g_mimeTypeMap.find(ext);
+
+		if (it != g_mimeTypeMap.end())
 		{
-			g_deleteQueue.push(handleOpen);
+			mimeType_ = it->second;
 		}
+
+		callback->Continue();
 
 		return true;
 	}
@@ -219,7 +191,15 @@ public:
 		{
 			bytes_read = device_->Read(file_, data_out, bytes_to_read);
 
-			return (bytes_read > 0);
+			bool readMore = (bytes_read > 0);
+
+			if (!readMore)
+			{
+				device_->Close(file_);
+				file_ = -1;
+			}
+
+			return readMore;
 		}
 
 		return false;

@@ -691,10 +691,13 @@ static void SceneLoaderScan(char* loader, uint8_t flags1, uint8_t flags2, uint8_
 
 static HookFunction hookFunction([]()
 {
+	// crash fix: popgroup unloading does an unknown streaming flush, which we don't want
+	hook::put<uint8_t>(hook::get_pattern("33 D2 E8 ? ? ? ? B2 01 8A CA E8 ? ? ? ? 48", 27), 0xC3);
+
 	// crash fix: sceneloader doesn't check if mapdatas obtained from boxstreamer still exist
 	// we'll check for that, as removing anything from boxstreamer is weird
 	MH_Initialize();
-	MH_CreateHook(hook::get_pattern("49 8B 0F 41 8A D9 40 8A F2 E8 ", -0x3A), SceneLoaderScan, (void**)&g_origSceneLoaderScan);
+	MH_CreateHook(hook::get_call(hook::get_pattern("0F 29 81 80 00 00 00 F3 0F 11 99 90 00 00 00 E9", 15)), SceneLoaderScan, (void**)&g_origSceneLoaderScan);
 	MH_EnableHook(MH_ALL_HOOKS);
 
 #if 0
@@ -746,9 +749,13 @@ static HookFunction hookFunction([]()
 		// additional netgame checks for scenarios
 
 		// 1737<
-		if (!Is2060())
+		if (!xbr::IsGameBuildOrGreater<2060>())
 		{
 			hook::nop(hook::get_pattern("B2 04 75 65 80 7B 39", 2), 2);
+		}
+		else if (xbr::IsGameBuildOrGreater<2189>())
+		{
+			hook::nop(hook::get_pattern("41 B0 04 75 72 0F B7 43 3A", 3), 2);
 		}
 		else
 		{
@@ -778,7 +785,7 @@ static HookFunction hookFunction([]()
 	}
 
 	// increase the heap size for allocator 0
-	hook::put<uint32_t>(hook::get_pattern("83 C8 01 48 8D 0D ? ? ? ? 41 B1 01 45 33 C0", 17), 600 * 1024 * 1024); // 600 MiB, default in 323 was 412 MiB
+	hook::put<uint32_t>(hook::get_pattern("83 C8 01 48 8D 0D ? ? ? ? 41 B1 01 45 33 C0", 17), 700 * 1024 * 1024); // 700 MiB, default in 323 was 412 MiB
 
 	// 1737+: increase rline allocator size using a hook (as Arxan)
 	MH_Initialize();
@@ -799,6 +806,9 @@ static HookFunction hookFunction([]()
 
 	// trace ERR_GEN_ZLIB_2 errors
 	CompTrace();
+
+	// don't disable low-priority objects when LOD distance is <20%
+	hook::nop(hook::get_pattern("0F 2F 47 24 0F 93 05", 4), 7);
 
 	//HookStereo();
 });

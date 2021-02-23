@@ -87,7 +87,7 @@
 	url = https://github.com/citizenfx/node.git
 [submodule "vendor/openssl"]
 	path = vendor/openssl
-	url = https://github.com/tatsuhiro-t/openssl.git
+	url = https://github.com/openssl/openssl.git
 [submodule "vendor/libopus"]
 	path = vendor/libopus
 	url = https://github.com/xiph/opus.git
@@ -147,7 +147,7 @@
 	url = https://github.com/citizenfx/Win2D.git
 [submodule "vendor/uvw"]
 	path = vendor/uvw
-	url = https://github.com/skypjack/uvw.git
+	url = https://github.com/citizenfx/uvw.git
 [submodule "vendor/uws"]
 	path = vendor/uws
 	url = https://github.com/uNetworking/uWebSockets.git
@@ -207,7 +207,7 @@
 	url = https://github.com/mpoeter/xenium
 [submodule "vendor/re3"]
 	path = vendor/re3
-	url = https://github.com/blattersturm/re3.git
+	url = https://git.gta.re/blattersturm/re3.git
 [submodule "vendor/rocksdb"]
 	path = vendor/rocksdb
 	url = https://github.com/facebook/rocksdb.git
@@ -250,3 +250,12 @@
 [submodule "vendor/heap-layers"]
 	path = vendor/heap-layers
 	url = https://github.com/emeryberger/Heap-Layers.git
+[submodule "ext/jexl-eval/deps/jexl-rs"]
+	path = ext/jexl-eval/deps/jexl-rs
+	url = https://github.com/blattersturm/jexl-rs
+[submodule "vendor/dspfilters"]
+	path = vendor/dspfilters
+	url = https://github.com/thorwe/DSPFilters.git
+[submodule "vendor/hdiffpatch"]
+	path = vendor/hdiffpatch
+	url = https://github.com/sisong/HDiffPatch.git

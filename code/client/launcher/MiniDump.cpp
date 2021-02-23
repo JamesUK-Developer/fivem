@@ -78,6 +78,7 @@ static void send_sentry_session(const json& data)
 	auto r = cpr::Post(
 	cpr::Url{ "https://sentry.fivem.net/api/2/envelope/" },
 	cpr::Body{bodyData.str()},
+	cpr::VerifySsl{ false },
 	cpr::Header{
 		{
 			"X-Sentry-Auth",
@@ -702,9 +703,9 @@ static void GatherCrashInformation()
 				auto extraDumpFiles = {
 					L"cache\\extra_dump_info.bin",
 					L"cache\\extra_dump_info2.bin",
-					L"cache\\game\\ros_launcher_documents\\launcher.log",
-					L"cache\\game\\ros_documents\\socialclub.log",
-					L"cache\\game\\ros_documents\\socialclub_launcher.log"
+					L"cache\\game\\ros_launcher_documents2\\launcher.log",
+					L"cache\\game\\ros_documents2\\socialclub.log",
+					L"cache\\game\\ros_documents2\\socialclub_launcher.log"
 				};
 
 				for (auto path : extraDumpFiles)
@@ -956,6 +957,7 @@ void InitializeDumpServer(int inheritedHandle, int parentPid)
 							}
 						}
 
+						bool moduleFound = false;
 						DWORD processLen = 0;
 						if (EnumProcessModules(process_handle, nullptr, 0, &processLen))
 						{
@@ -1001,6 +1003,82 @@ void InitializeDumpServer(int inheritedHandle, int parentPid)
 											moduleBaseString = va(L"%s+%X", wcsrchr(filename, '\\') + 1, (uintptr_t)((char*)ex.ExceptionAddress - (char*)module));
 
 											crashHash = moduleBaseString;
+											moduleFound = true;
+
+											break;
+										}
+									}
+								}
+							}
+						}
+
+						if (!moduleFound)
+						{
+							// is this an unloaded module?
+							typedef VOID (WINAPI* _tRtlGetUnloadEventTraceEx)(
+							_Out_ PULONG * ElementSize,
+							_Out_ PULONG * ElementCount,
+							_Out_ PVOID * EventTrace);
+
+							typedef struct _RTL_UNLOAD_EVENT_TRACE
+							{
+								PVOID BaseAddress; // Base address of dll
+								SIZE_T SizeOfImage; // Size of image
+								ULONG Sequence; // Sequence number for this event
+								ULONG TimeDateStamp; // Time and date of image
+								ULONG CheckSum; // Image checksum
+								WCHAR ImageName[32]; // Image name
+							} RTL_UNLOAD_EVENT_TRACE, *PRTL_UNLOAD_EVENT_TRACE;
+
+							// collect memory addresses of unloaded modules in *client*
+							auto _RtlGetUnloadEventTraceEx = (_tRtlGetUnloadEventTraceEx)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetUnloadEventTraceEx");
+
+							if (_RtlGetUnloadEventTraceEx)
+							{
+								PULONG RtlpUnloadEventTraceExSizePtr;
+								PULONG RtlpUnloadEventTraceExNumberPtr;
+								PVOID RtlpUnloadEventTraceExPtr;
+
+								_RtlGetUnloadEventTraceEx(&RtlpUnloadEventTraceExSizePtr, &RtlpUnloadEventTraceExNumberPtr, &RtlpUnloadEventTraceExPtr);
+
+								// these addresses are going to be the same in the client process, so...
+								PCHAR RtlpUnloadEventTraceEx = NULL;
+								ULONG RtlpUnloadEventTraceExSize = 0;
+								ULONG RtlpUnloadEventTraceExNumber = 0;
+
+								bool canDo = readClient(RtlpUnloadEventTraceExSizePtr, &RtlpUnloadEventTraceExSize)
+									&& readClient(RtlpUnloadEventTraceExNumberPtr, &RtlpUnloadEventTraceExNumber)
+									&& readClient(RtlpUnloadEventTraceExPtr, &RtlpUnloadEventTraceEx);
+
+								if (canDo && RtlpUnloadEventTraceExSize >= sizeof(RTL_UNLOAD_EVENT_TRACE))
+								{
+									for (ULONG idx = 0; idx < RtlpUnloadEventTraceExNumber; idx++)
+									{
+										RTL_UNLOAD_EVENT_TRACE traceEntry;
+										if (readClient(RtlpUnloadEventTraceEx + (idx * RtlpUnloadEventTraceExSize), &traceEntry))
+										{
+											auto base = reinterpret_cast<char*>(traceEntry.BaseAddress);
+
+											if (ex.ExceptionAddress >= base && ex.ExceptionAddress < (base + traceEntry.SizeOfImage))
+											{
+												wchar_t filename[MAX_PATH] = { 0 };
+												wcscpy(filename, traceEntry.ImageName);
+
+												// lowercase the filename
+												for (wchar_t* p = filename; *p; ++p)
+												{
+													if (*p >= 'A' && *p <= 'Z')
+													{
+														*p += 0x20;
+													}
+												}
+
+												// create the string
+												auto moduleBaseString = va(L"%s_unloaded+%X", filename, (uintptr_t)((char*)ex.ExceptionAddress - base));
+												crashHash = moduleBaseString;
+
+												break;
+											}
 										}
 									}
 								}
@@ -1176,10 +1254,14 @@ void InitializeDumpServer(int inheritedHandle, int parentPid)
 			if (crashHash.find(L"libcef") != std::string::npos)
 			{
 				shouldTerminate = false;
+
+				// we want a cef.log and don't want the core log (given its frequency)
+				files[L"cef_log"] = MakeRelativeCitPath(L"cef.log");
+				files.erase(L"upload_file_log");
 			}
 
 			// NVIDIA crashes in Chrome GPU process
-			if (crashHash.find(L"nvwgf2") != std::string::npos)
+			if (wcsstr(imageName, L"GTAProcess") == nullptr && crashHash.find(L"nvwgf2") != std::string::npos)
 			{
 				shouldTerminate = false;
 				shouldUpload = false;
@@ -1451,13 +1533,8 @@ void InitializeDumpServer(int inheritedHandle, int parentPid)
 		int timeout = 20000;
 
 		// upload the actual minidump file as well
-#ifdef GTA_NY
-		if (HTTPUpload::SendRequest(L"http://cr.citizen.re:5100/submit", parameters, files, nullptr, &responseBody, &responseCode))
-#elif defined(GTA_FIVE)
+#if defined(GTA_FIVE)
 		if (uploadCrashes && shouldUpload && HTTPUpload::SendMultipartPostRequest(L"https://crash-ingress.fivem.net/post", parameters, files, &timeout, &responseBody, &responseCode))
-#else
-		if (false)
-#endif
 		{
 			trace("Crash report service returned %s\n", ToNarrow(responseBody));
 			crashId = responseBody;
@@ -1467,6 +1544,10 @@ void InitializeDumpServer(int inheritedHandle, int parentPid)
 			crashIdError = fmt::sprintf(L"Error uploading: HTTP %d%s", responseCode, !responseBody.empty() ? L" (" + responseBody + L")" : L"");
 			crashId = L"";
 		}
+#else
+		crashIdError = L"Crash reporting is disabled for this title.";
+		crashId = L"";
+#endif
 
 		if (thread.joinable())
 		{
@@ -1547,8 +1628,33 @@ void InitializeMiniDumpOverride()
 
 static ExceptionHandler* g_exceptionHandler;
 
-bool InitializeExceptionHandler()
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+extern "C" BOOL WINAPI _CRT_INIT(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
+extern "C" void WINAPI __security_init_cookie();
+
+static bool initialized = false;
+
+extern "C" DLL_EXPORT void EarlyInitializeExceptionHandler()
 {
+	if (initialized)
+	{
+		return;
+	}
+
+	__security_init_cookie();
+	_CRT_INIT((HINSTANCE)&__ImageBase, DLL_PROCESS_ATTACH, nullptr);
+	_CRT_INIT((HINSTANCE)&__ImageBase, DLL_THREAD_ATTACH, nullptr);
+}
+
+extern "C" DLL_EXPORT bool InitializeExceptionHandler()
+{
+	if (initialized)
+	{
+		return false;
+	}
+
+	initialized = true;
+
 	AllocateExceptionBuffer();
 
 	// don't initialize when under a debugger, as debugger filtering is only done when execution gets to UnhandledExceptionFilter in basedll

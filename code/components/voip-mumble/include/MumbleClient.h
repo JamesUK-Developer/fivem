@@ -95,13 +95,17 @@ public:
 
 	virtual std::wstring GetPlayerNameFromServerId(uint32_t serverId) = 0;
 
-	virtual uint32_t GetVoiceChannelFromServerId(uint32_t serverId) = 0;
+	virtual std::string GetVoiceChannelFromServerId(uint32_t serverId) = 0;
 
 	virtual void GetTalkers(std::vector<std::string>* names) = 0;
 
 	virtual void SetPositionHook(const TPositionHook& hook) = 0;
 
 	virtual void SetAudioDistance(float distance) = 0;
+
+	virtual void SetAudioInputDistance(float distance) = 0;
+
+	virtual void SetAudioOutputDistance(float distance) = 0;
 
 	virtual float GetAudioDistance() = 0;
 
@@ -112,6 +116,10 @@ public:
 	virtual void UpdateVoiceTarget(int idx, const VoiceTargetConfig& config) = 0;
 
 	virtual void SetVoiceTarget(int idx) = 0;
+
+	virtual void AddListenChannel(const std::string& channelName) = 0;
+
+	virtual void RemoveListenChannel(const std::string& channelName) = 0;
 
 	virtual std::shared_ptr<lab::AudioContext> GetAudioContext(const std::string& name) = 0;
 

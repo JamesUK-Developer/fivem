@@ -28,6 +28,15 @@
 #include <NetworkPlayerMgr.h>
 #include <netObject.h>
 
+#include <CrossBuildRuntime.h>
+
+#include <ResourceManager.h>
+#include <ResourceEventComponent.h>
+
+#if __has_include(<GameAudioState.h>)
+#include <GameAudioState.h>
+#endif
+
 class FxNativeInvoke
 {
 private:
@@ -89,70 +98,9 @@ void MumbleVoice_BindNetLibrary(NetLibrary* library)
 	g_netLibrary = library;
 }
 
-#include <rapidjson/document.h>
-
 void Policy_BindNetLibrary(NetLibrary* library)
 {
 	g_netLibrary = library;
-
-	g_netLibrary->OnConnectOKReceived.Connect([](NetAddress addr)
-	{
-		Instance<ICoreGameInit>::Get()->SetData("policy", "");
-
-		Instance<HttpClient>::Get()->DoGetRequest(fmt::sprintf("http://%s:%d/info.json", addr.GetAddress(), addr.GetPort()), [=](bool success, const char* data, size_t size)
-		{
-			if (success)
-			{
-				try
-				{
-					json info = json::parse(data, data + size);
-
-					if (info.is_object() && info["vars"].is_object())
-					{
-						auto val = info["vars"].value("sv_licenseKeyToken", "");
-
-						if (!val.empty())
-						{
-							Instance<HttpClient>::Get()->DoGetRequest(fmt::sprintf("https://policy-live.fivem.net/api/policy/%s", val), [=](bool success, const char* data, size_t size)
-							{
-								if (success)
-								{
-									rapidjson::Document doc;
-									doc.Parse(data, size);
-
-									std::stringstream policyStr;
-
-									if (!doc.HasParseError() && doc.IsArray())
-									{
-										for (auto it = doc.Begin(); it != doc.End(); it++)
-										{
-											if (it->IsString())
-											{
-												policyStr << "[" << it->GetString() << "]";
-											}
-										}
-									}
-
-									std::string policy = policyStr.str();
-
-									if (!policy.empty())
-									{
-										trace("Server feature policy is %s\n", policy);
-									}
-
-									Instance<ICoreGameInit>::Get()->SetData("policy", policy);
-								}
-							});
-						}
-					}
-				}
-				catch (std::exception& e)
-				{
-					trace("Server policy - get failed for %s\n", e.what());
-				}
-			}
-		});
-	});
 }
 
 static IMumbleClient* g_mumbleClient;
@@ -173,8 +121,16 @@ static struct
 	concurrency::concurrent_queue<std::function<void()>> mainFrameExecQueue;
 } g_mumble;
 
+static bool g_voiceActiveByScript = true;
+
+static bool Mumble_ShouldConnect()
+{
+	return g_preferenceArray[PREF_VOICE_ENABLE] && Instance<ICoreGameInit>::Get()->OneSyncEnabled && g_voiceActiveByScript;
+}
+
 static void Mumble_Connect()
 {
+	g_mumble.connected = false;
 	g_mumble.errored = false;
 	g_mumble.connecting = true;
 
@@ -185,6 +141,18 @@ static void Mumble_Connect()
 		try
 		{
 			auto info = task.get();
+
+			auto eventManager = Instance<fx::ResourceManager>::Get()->GetComponent<fx::ResourceEventManagerComponent>();
+
+			/*NETEV mumbleConnected CLIENT
+			/#*
+			 * An event triggered when the game completes (re)connecting to a Mumble server.
+			 *
+			 * @param address - The address of the Mumble server connected to.
+			 #/
+			declare function mumbleConnected(address: string): void;
+			*/
+			eventManager->QueueEvent2("mumbleConnected", {}, info->address.ToString());
 
 			g_mumble.connectionInfo = g_mumbleClient->GetConnectionInfo();
 
@@ -216,7 +184,7 @@ static void Mumble_Disconnect(bool reconnect = false)
 
 	g_mumbleClient->DisconnectAsync().then([=]()
 	{
-		if (reconnect)
+		if (reconnect && Mumble_ShouldConnect())
 		{
 			Mumble_Connect();
 		}
@@ -262,11 +230,9 @@ static void Mumble_RunFrame()
 		return;
 	}
 
-	bool shouldConnect = g_preferenceArray[PREF_VOICE_ENABLE] && Instance<ICoreGameInit>::Get()->OneSyncEnabled;
-
 	if (!g_mumble.connected || (g_mumble.connectionInfo && !g_mumble.connectionInfo->isConnected))
 	{
-		if (shouldConnect && !g_mumble.connecting && !g_mumble.errored)
+		if (Mumble_ShouldConnect() && !g_mumble.connecting && !g_mumble.errored)
 		{
 			if (GetTickCount64() > g_mumble.nextConnectAt)
 			{
@@ -285,7 +251,7 @@ static void Mumble_RunFrame()
 	}
 	else
 	{
-		if (!shouldConnect)
+		if (!Mumble_ShouldConnect())
 		{
 			Mumble_Disconnect();
 		}
@@ -311,7 +277,16 @@ static void Mumble_RunFrame()
 
 	g_mumbleClient->SetActivationMode(activationMode);
 
-	g_mumbleClient->SetOutputVolume(g_preferenceArray[PREF_VOICE_OUTPUT_VOLUME] * 0.1f);
+#if __has_include(<GameAudioState.h>)
+	if (ShouldMuteGameAudio())
+	{
+		g_mumbleClient->SetOutputVolume(0.0f);
+	}
+	else
+#endif
+	{
+		g_mumbleClient->SetOutputVolume(g_preferenceArray[PREF_VOICE_OUTPUT_VOLUME] * 0.1f);
+	}
 
 	float cameraFront[3];
 	float cameraTop[3];
@@ -515,6 +490,8 @@ static HookFunction initFunction([]()
 
 		Mumble_Disconnect();
 		o_talkers.reset();
+
+		g_voiceActiveByScript = true;
 	});
 });
 
@@ -540,7 +517,7 @@ static bool _isPlayerTalking(void* mgr, char* playerData)
 	// #TODO1365
 	// #TODO1493
 	// #TODO1604
-	auto playerInfo = playerData - 32 - 48 - 16;
+	auto playerInfo = playerData - 32 - 48 - 16 - (xbr::IsGameBuildOrGreater<2060>() ? 8 : 0);
 
 	// get the ped
 	auto ped = *(char**)(playerInfo + 456);
@@ -613,7 +590,17 @@ static std::shared_ptr<lab::AudioContext> getAudioContext(int playerId)
 	std::string name = fmt::sprintf("[%d] %s",
 		FxNativeInvoke::Invoke<int>(getServerId, playerId),
 		FxNativeInvoke::Invoke<const char*>(getPlayerName, playerId));
+	return g_mumbleClient->GetAudioContext(name);
+}
 
+static std::shared_ptr<lab::AudioContext> getAudioContextByServerId(int serverId)
+{
+	if (!g_mumble.connected)
+	{
+		return {};
+	}
+
+	std::string name = ToNarrow(g_mumbleClient->GetPlayerNameFromServerId(serverId));
 	return g_mumbleClient->GetAudioContext(name);
 }
 
@@ -757,6 +744,26 @@ static HookFunction hookFunction([]()
 			}
 		});
 
+		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_ADD_VOICE_CHANNEL_LISTEN", [](fx::ScriptContext& context)
+		{
+			auto channel = context.GetArgument<int>(0);
+
+			if (g_mumble.connected)
+			{
+				g_mumbleClient->AddListenChannel(fmt::sprintf("Game Channel %d", channel));
+			}
+		});
+
+		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_REMOVE_VOICE_CHANNEL_LISTEN", [](fx::ScriptContext& context)
+		{
+			auto channel = context.GetArgument<int>(0);
+
+			if (g_mumble.connected)
+			{
+				g_mumbleClient->RemoveListenChannel(fmt::sprintf("Game Channel %d", channel));
+			}
+		});
+
 		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_ADD_VOICE_TARGET_CHANNEL", [](fx::ScriptContext& context)
 		{
 			auto id = context.GetArgument<int>(0);
@@ -836,11 +843,23 @@ static HookFunction hookFunction([]()
 		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_GET_VOICE_CHANNEL_FROM_SERVER_ID", [](fx::ScriptContext& context)
 		{
 			int serverId = context.GetArgument<int>(0);
-			int channelId = 0;
+			int channelId = -1;
 
 			if (g_mumble.connected)
 			{
-				channelId = g_mumbleClient->GetVoiceChannelFromServerId(serverId);
+				auto channelName = g_mumbleClient->GetVoiceChannelFromServerId(serverId);
+
+				if (!channelName.empty())
+				{
+					if (channelName.find("Game Channel ") == 0)
+					{
+						channelId = std::stoi(channelName.substr(13));
+					}
+					else if (channelName == "Root")
+					{
+						channelId = 0;
+					}
+				}
 			}
 
 			context.SetResult<int>(channelId);
@@ -871,7 +890,22 @@ static HookFunction hookFunction([]()
 			}
 		});
 
+		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_SET_AUDIO_INPUT_DISTANCE", [](fx::ScriptContext& context)
+		{
+			float dist = context.GetArgument<float>(0);
+
+			g_mumbleClient->SetAudioInputDistance(dist);
+		});
+
+		fx::ScriptEngine::RegisterNativeHandler("MUMBLE_SET_AUDIO_OUTPUT_DISTANCE", [](fx::ScriptContext& context)
+		{
+			float dist = context.GetArgument<float>(0);
+
+			g_mumbleClient->SetAudioOutputDistance(dist);
+		});
+
 		scrBindGlobal("GET_AUDIOCONTEXT_FOR_CLIENT", getAudioContext);
+		scrBindGlobal("GET_AUDIOCONTEXT_FOR_SERVERID", getAudioContextByServerId);
 
 		fx::ScriptEngine::RegisterNativeHandler("SET_PLAYER_TALKING_OVERRIDE", [](fx::ScriptContext& context)
 		{
@@ -957,6 +991,15 @@ static HookFunction hookFunction([]()
 			float proximity = g_mumbleClient->GetAudioDistance();
 
 			context.SetResult<float>(proximity);
+		});
+
+		auto origSetVoiceActive = fx::ScriptEngine::GetNativeHandler(0xBABEC9E69A91C57B);
+
+		fx::ScriptEngine::RegisterNativeHandler(0xBABEC9E69A91C57B, [origSetVoiceActive](fx::ScriptContext& context)
+		{
+			(*origSetVoiceActive)(context);
+
+			g_voiceActiveByScript = context.GetArgument<bool>(0);
 		});
 	});
 

@@ -123,6 +123,12 @@ static InitFunction initFunction([]()
 
 		for (auto& native : rpcConfiguration->GetNatives())
 		{
+			// deprecated by ServerSetters
+			if (native->GetName() == "CREATE_PED" || native->GetName() == "CREATE_OBJECT_NO_OFFSET")
+			{
+				continue;
+			}
+
 			// RPC NATIVE
 			fx::ScriptEngine::RegisterNativeHandler(native->GetName(), [=](fx::ScriptContext& ctx)
 			{
@@ -465,7 +471,10 @@ static InitFunction initFunction([]()
 
 				auto sendToClient = [&](const fx::ClientSharedPtr& cl)
 				{
-					cl->SendPacket(0, buffer, NetPacketType_ReliableReplayed);
+					if (cl)
+					{
+						cl->SendPacket(0, buffer, NetPacketType_ReliableReplayed);
+					}
 				};
 
 				if (clientIdx == -2)

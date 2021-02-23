@@ -3,6 +3,7 @@
 #include <grcTexture.h>
 
 #include <MinHook.h>
+#include <CrossBuildRuntime.h>
 
 #include <Hooking.h>
 
@@ -248,6 +249,13 @@ namespace rage
 
 void GetGameResolution(int& x, int& y)
 {
+	if (!rage::g_WindowWidth || !rage::g_WindowHeight)
+	{
+		x = 0;
+		y = 0;
+		return;
+	}
+
 	x = *rage::g_WindowWidth;
 	y = *rage::g_WindowHeight;
 }
@@ -501,33 +509,16 @@ static LPWSTR GetCommandLineWHook()
 	return str;
 }
 
-static hook::cdecl_stub<void* (const char* appName)> _getD3D12Driver([]()
-{
-	//return hook::get_call(hook::get_pattern("75 59 48 8B CB E8", -5));
-	//return hook::get_call(hook::get_pattern("E8 ? ? ? ? EB 3B 48 8D 15 ? ? ? ? 48 8B CF"));
-
-	// 1232+
-	return hook::get_call(hook::get_pattern("48 8B CF E8 ? ? ? ? 85 C0 75 ? 48 8B CB", 15));
-});
-
-static hook::cdecl_stub<void* (const char* appName)> _getVulkanDriver([]()
-{
-	//return hook::get_call(hook::get_pattern("75 59 48 8B CB E8", 8));
-	//return hook::get_call(hook::get_pattern("E8 ? ? ? ? EB 3B 48 8D 15 ? ? ? ? 48 8B CF", -29));
-	// 1232+
-	return hook::get_call(hook::get_pattern("83 E9 01 74 ? 83 F9 02 75 ? 48 8B CB", 13));
-});
+static void* g_d3d12Driver;
+static void* g_vkDriver;
 
 GraphicsAPI GetCurrentGraphicsAPI()
 {
-	static auto d3d12 = _getD3D12Driver("Red Dead Redemption 2");
-	static auto vk = _getVulkanDriver("Red Dead Redemption 2");
-
-	if (*sgaDriver == d3d12)
+	if (*sgaDriver == g_d3d12Driver)
 	{
 		return GraphicsAPI::D3D12;
 	}
-	else if (*sgaDriver == vk)
+	else if (*sgaDriver == g_vkDriver)
 	{
 		return GraphicsAPI::Vulkan;
 	}
@@ -591,6 +582,17 @@ static HookFunction hookFunction([]()
 	sgaDriver = hook::get_address<decltype(sgaDriver)>(hook::get_pattern("C6 82 ? ? 00 00 01 C6 82 ? ? 00 00 01", 17));
 
 	g_textureFactory = hook::get_address<decltype(g_textureFactory)>(hook::get_pattern("48 8D 54 24 50 C7 44 24 50 80 80 00 00 48 8B C8", 0x25));
+	
+	if (xbr::IsGameBuildOrGreater<1355>())
+	{
+		g_d3d12Driver = hook::get_address<void*>(hook::get_pattern("B9 01 00 00 00 48 83 3D ? ? ? ? 00 0F", 25));
+	}
+	else
+	{
+		g_d3d12Driver = hook::get_address<void*>(hook::get_pattern("83 E9 01 74 ? 83 F9 02 75 ? 48 8B CF E8", -4));
+	}
+
+	g_vkDriver = hook::get_address<void*>(hook::get_pattern("B9 03 00 00 00 48 83 3D ? ? ? ? 00 0F", 25));
 
 	g_d3d12Device = hook::get_address<decltype(g_d3d12Device)>(hook::get_pattern("48 8B 01 FF 50 78 48 8B 0B 48 8D", -7));
 	g_vkHandle = hook::get_address<decltype(g_vkHandle)>(hook::get_pattern("8D 50 41 8B CA 44 8B C2 F3 48 AB 48 8B 0D", 14));

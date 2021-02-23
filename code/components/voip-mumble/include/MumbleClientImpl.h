@@ -100,6 +100,10 @@ public:
 
 	virtual void SetChannel(const std::string& channelName) override;
 
+	virtual void AddListenChannel(const std::string& channelName) override;
+
+	virtual void RemoveListenChannel(const std::string& channelName) override;
+
 	virtual std::shared_ptr<lab::AudioContext> GetAudioContext(const std::string& name) override;
 
 	virtual void SetClientVolumeOverride(const std::wstring& clientName, float volume) override;
@@ -108,13 +112,17 @@ public:
 
 	virtual std::wstring GetPlayerNameFromServerId(uint32_t serverId) override;
 
-	virtual uint32_t GetVoiceChannelFromServerId(uint32_t serverId) override;
+	virtual std::string GetVoiceChannelFromServerId(uint32_t serverId) override;
 
 	virtual void GetTalkers(std::vector<std::string>* referenceIds) override;
 
 	virtual void SetPositionHook(const TPositionHook& hook) override;
 
 	virtual void SetAudioDistance(float distance) override;
+
+	virtual void SetAudioInputDistance(float distance) override;
+
+	virtual void SetAudioOutputDistance(float distance) override;
 
 	virtual float GetAudioDistance() override;
 
@@ -196,6 +204,10 @@ private:
 	std::string m_curManualChannel;
 
 	std::string m_lastManualChannel;
+
+	std::set<std::string> m_curChannelListens;
+
+	std::set<std::string> m_lastChannelListens;
 
 	std::map<int, VoiceTargetConfig> m_pendingVoiceTargetUpdates;
 

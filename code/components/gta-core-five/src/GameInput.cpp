@@ -21,6 +21,7 @@
 #include <CrossBuildRuntime.h>
 
 #include <GameInput.h>
+#include <InputHook.h>
 
 namespace rage
 {
@@ -376,7 +377,7 @@ void Binding::Update(rage::ioMapper* mapper)
 	bool down = m_value.IsDown(0.5f, rage::ioValue::NO_DEAD_ZONE);
 
 	// text input should count as up
-	if (_isTextInputBoxActive())
+	if (Instance<ICoreGameInit>::Get()->GetGameLoaded() && _isTextInputBoxActive())
 	{
 		down = false;
 	}
@@ -403,29 +404,45 @@ void Binding::Update(rage::ioMapper* mapper)
 				std::string thisString = thisCmd.str();
 				thisCmd.str("");
 
-				// if this is a button binding
-				if (thisString[0] == '+')
+				// suppress any missing commands (requested via https://forum.cfx.re/t/1859314/3)
+				bool ignore = false;
+
+				if (!m_tag.empty())
 				{
-					if (isDownEvent)
+					auto parsed = console::Tokenize(thisString);
+
+					if (parsed.Count() > 0 && !console::GetDefaultContext()->GetCommandManager()->HasCommand(parsed[0]))
 					{
-						// TODO: add key code arguments
-						console::GetDefaultContext()->AddToBuffer(thisString + "\n");
+						ignore = true;
+					}
+				}
+
+				if (!ignore)
+				{
+					// if this is a button binding
+					if (thisString[0] == '+')
+					{
+						if (isDownEvent)
+						{
+							// TODO: add key code arguments
+							console::GetDefaultContext()->AddToBuffer(thisString + "\n");
+						}
+						else
+						{
+							// up event is -[button cmd]
+							// TODO: add key code arguments
+							console::GetDefaultContext()->AddToBuffer("-" + thisString.substr(1) + "\n");
+						}
+
+						hadButtonEvent = true;
 					}
 					else
 					{
-						// up event is -[button cmd]
-						// TODO: add key code arguments
-						console::GetDefaultContext()->AddToBuffer("-" + thisString.substr(1) + "\n");
-					}
-
-					hadButtonEvent = true;
-				}
-				else
-				{
-					// if not, just execute the command on down
-					if (isDownEvent || hadButtonEvent)
-					{
-						console::GetDefaultContext()->AddToBuffer(thisString + "\n");
+						// if not, just execute the command on down
+						if (isDownEvent || hadButtonEvent)
+						{
+							console::GetDefaultContext()->AddToBuffer(thisString + "\n");
+						}
 					}
 				}
 			}
@@ -613,16 +630,16 @@ void BindingManager::Initialize()
 
 std::shared_ptr<Binding> BindingManager::Bind(int ioSource, int ioParameter, const std::string& commandString)
 {
-	for (auto& binding : m_bindings)
+	for (auto it = m_bindings.begin(); it != m_bindings.end(); )
 	{
-		if (binding.second->GetCommand() == commandString && IsTagActive(binding.second->GetTag()))
+		if (it->second->GetCommand() == commandString && IsTagActive(it->second->GetTag()))
 		{
-			m_bindings.erase(binding.first);
-			break;
+			it = m_bindings.erase(it);
+			continue;
 		}
-	}
 
-	//m_bindings.erase({ ioSource, ioParameter });
+		it++;
+	}
 
 	auto binding = std::make_shared<Binding>(commandString);
 	binding->SetBinding({ ioSource, ioParameter });
@@ -714,9 +731,13 @@ void BindingManager::CreateButtons()
 			auto button = std::make_unique<Button>(thisNameStr);
 			button->SetFromControl(g_control, field->index);
 
-			if (!Is2060())
+			if (!xbr::IsGameBuildOrGreater<2060>())
 			{
 				button->SetFromControl((char*)g_control + 0x21A98, field->index); // 1604
+			}
+			else
+			{
+				button->SetFromControl((char*)g_control + 0x21B78, field->index); // 2198
 			}
 
 			m_buttons.push_back(std::move(button));
@@ -745,6 +766,7 @@ bool IsTagActive(const std::string& tag)
 }
 
 static void(*ioMapper_Update)(void*, uint32_t, bool);
+void UpdateButtonPlumbing();
 
 static void ioMapper_UpdateStub(rage::ioMapper* mapper, uint32_t time, bool a3)
 {
@@ -753,6 +775,8 @@ static void ioMapper_UpdateStub(rage::ioMapper* mapper, uint32_t time, bool a3)
 	ioMapper_Update(mapper, time, a3);
 
 	bindingManager.UpdateButtons();
+
+	UpdateButtonPlumbing();
 }
 
 void ProfileSettingsInit();
@@ -830,7 +854,7 @@ namespace game
 
 			for (auto& binding : bindingManager.GetBindings())
 			{
-				if (binding.second->GetCommand() == command)
+				if (binding.second->GetCommand() == command && IsTagActive(binding.second->GetTag()))
 				{
 					return;
 				}
@@ -876,7 +900,14 @@ static void GetMappingCategoryInputs(uint32_t* categoryId, atArray<uint32_t>& co
 
 	if (*categoryId == HashString("PM_PANE_CFX"))
 	{
-		for (auto& binding : g_registeredBindings)
+		std::vector<std::pair<std::string, std::tuple<std::string, std::string>>> sortedBindings(g_registeredBindings.begin(), g_registeredBindings.end());
+		std::sort(sortedBindings.begin(), sortedBindings.end(), [](const auto& left, const auto& right)
+		{
+			// #TODO: Unicode-aware comparison
+			return std::get<1>(left.second) < std::get<1>(right.second);
+		});
+
+		for (auto& binding : sortedBindings)
 		{
 			controlIds.Set(controlIds.GetCount(), HashBinding(binding.first));
 		}
@@ -899,7 +930,7 @@ static void* GetBindingForControl(void* control, rage::ioInputSource* outBinding
 
 			for (auto& bindingSet : bindingManager.GetBindings())
 			{
-				if (bindingSet.second->GetCommand() == controlRef.first)
+				if (bindingSet.second->GetCommand() == controlRef.first && IsTagActive(bindingSet.second->GetTag()))
 				{
 					bindingSet.second->GetBinding(*outBinding);
 					outBinding->unk = source;
@@ -1009,6 +1040,33 @@ static void MapFuncHook(void* a1, uint32_t controlIdx, void* a3, void* a4)
 	{
 		g_origMapFunc(a1, controlIdx, a3, a4);
 	}
+}
+
+static hook::thiscall_stub<rage::ioInputSource*(void* control, rage::ioInputSource* outParam, int controlIdx, int unkN1, bool secondaryBinding, bool)> _control_getBinding([]()
+{
+	return hook::get_call(hook::get_pattern("40 88 6C 24 28 40 88 6C 24 20 E8 ? ? ? ? 41 8D", 10));
+});
+
+void UpdateButtonPlumbing()
+{
+	rage::ioInputSource controlDatas[2];
+	_control_getBinding(g_control, &controlDatas[0], 249 /* INPUT_PUSH_TO_TALK */, -1, false, false);
+	_control_getBinding(g_control, &controlDatas[1], 249 /* INPUT_PUSH_TO_TALK */, -1, true, false);
+
+	auto mapBypass = [](rage::ioInputSource& controlData)
+	{
+		InputHook::ControlBypass bypass = { 0 };
+
+		if (controlData.source == 0 /* IOMS_KEYBOARD */ || controlData.source == 7 /* IOMS_MOUSE_BUTTON */)
+		{
+			bypass.isMouse = controlData.source == 7;
+			bypass.ctrlIdx = controlData.parameter;
+		}
+
+		return bypass;
+	};
+
+	InputHook::SetControlBypasses({ mapBypass(controlDatas[0]), mapBypass(controlDatas[1]) });
 }
 
 #include <boost/algorithm/string.hpp>
